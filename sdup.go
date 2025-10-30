@@ -72,11 +72,17 @@ func resolveSSHConfig(alias string, fallbackPort int) (*HostConfig, error) {
 		}
 	}
 
-	// default identity files if not present
+	// default identity files if not present: scan ~/.ssh
 	if len(cfg.IdentityFiles) == 0 {
-		cfg.IdentityFiles = []string{
-			filepath.Join(homeDir, ".ssh", "id_ed25519"),
-			filepath.Join(homeDir, ".ssh", "id_rsa"),
+		cfg.IdentityFiles = findDefaultIdentityFiles(homeDir)
+		// still empty: fallback to common names
+		if len(cfg.IdentityFiles) == 0 {
+			cfg.IdentityFiles = []string{
+				filepath.Join(homeDir, ".ssh", "id_ed25519"),
+				filepath.Join(homeDir, ".ssh", "id_rsa"),
+				filepath.Join(homeDir, ".ssh", "id_ecdsa"),
+				filepath.Join(homeDir, ".ssh", "id_dsa"),
+			}
 		}
 	}
 
@@ -108,14 +114,18 @@ func chooseAuth(ids []string) (goph.Auth, error) {
 		}
 	}
 	// try identity files without passphrase
+	passphrase := getKeyPassphrase()
 	for _, id := range ids {
 		if fileExists(id) {
-			// empty passphrase assumed
-			auth, err := goph.Key(id, "")
+			auth, err := goph.Key(id, passphrase)
 			if err == nil {
 				return auth, nil
 			}
 		}
+	}
+	// fallback to password from env if provided
+	if passAuth, ok := getPasswordAuth(); ok {
+		return passAuth, nil
 	}
 	return nil, errors.New("no valid SSH auth method found")
 }
@@ -127,6 +137,67 @@ func fileExists(path string) bool {
 		return false
 	}
 	return !st.IsDir()
+}
+
+// findDefaultIdentityFiles scans ~/.ssh for typical private keys
+func findDefaultIdentityFiles(homeDir string) []string {
+	sshDir := filepath.Join(homeDir, ".ssh")
+	entries, err := os.ReadDir(sshDir)
+	if err != nil {
+		return nil
+	}
+	add := func(set map[string]struct{}, p string) {
+		if fileExists(p) {
+			set[p] = struct{}{}
+		}
+	}
+	keys := make(map[string]struct{})
+	// common names
+	add(keys, filepath.Join(sshDir, "id_ed25519"))
+	add(keys, filepath.Join(sshDir, "id_rsa"))
+	add(keys, filepath.Join(sshDir, "id_ecdsa"))
+	add(keys, filepath.Join(sshDir, "id_dsa"))
+	// scan id_* files excluding .pub
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, "id_") && !strings.HasSuffix(name, ".pub") {
+			add(keys, filepath.Join(sshDir, name))
+		}
+	}
+	// convert to slice
+	out := make([]string, 0, len(keys))
+	for p := range keys {
+		out = append(out, p)
+	}
+	return out
+}
+
+// getKeyPassphrase returns passphrase from env if provided
+func getKeyPassphrase() string {
+	return os.Getenv("SDUP_SSH_KEY_PASSPHRASE")
+}
+
+// getPasswordAuth returns password auth from env if set
+func getPasswordAuth() (goph.Auth, bool) {
+	pwd := os.Getenv("SDUP_SSH_PASSWORD")
+	if strings.TrimSpace(pwd) != "" {
+		return goph.Password(pwd), true
+	}
+	return nil, false
+}
+
+// isAuthFailure checks common ssh authentication failure messages
+func isAuthFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "unable to authenticate") ||
+		strings.Contains(msg, "no supported methods remain") ||
+		strings.Contains(msg, "handshake failed")
 }
 
 // fetchExecStartPath runs systemctl show and extracts ExecStart path
@@ -261,7 +332,21 @@ func SystemdUpdate(localFile, remoteService, remoteHost string, remotePort int) 
 		Callback: ssh.InsecureIgnoreHostKey(),
 	})
 	if err != nil {
-		return err
+		// Retry with password auth if authentication failed and password is set
+		if isAuthFailure(err) {
+			if passAuth, ok := getPasswordAuth(); ok {
+				client, err = goph.NewConn(&goph.Config{
+					User:     cfg.User,
+					Addr:     cfg.Hostname,
+					Port:     uint(cfg.Port),
+					Auth:     passAuth,
+					Callback: ssh.InsecureIgnoreHostKey(),
+				})
+			}
+		}
+		if err != nil {
+			return err
+		}
 	}
 	defer client.Close()
 
