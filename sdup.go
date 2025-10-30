@@ -104,30 +104,29 @@ func parseInt(s string) (int, error) {
 	return n, nil
 }
 
-// chooseAuth tries agent first then identity files
-func chooseAuth(ids []string) (goph.Auth, error) {
-	// prefer ssh-agent if available
+// buildAuthChain constructs ordered auth methods: agent -> keys -> password
+func buildAuthChain(ids []string) []goph.Auth {
+	chain := []goph.Auth{}
+	// agent first if available and usable
 	if os.Getenv("SSH_AUTH_SOCK") != "" {
-		auth, err := goph.UseAgent()
-		if err == nil {
-			return auth, nil
+		if auth, err := goph.UseAgent(); err == nil {
+			chain = append(chain, auth)
 		}
 	}
-	// try identity files without passphrase
+	// then key files
 	passphrase := getKeyPassphrase()
 	for _, id := range ids {
 		if fileExists(id) {
-			auth, err := goph.Key(id, passphrase)
-			if err == nil {
-				return auth, nil
+			if auth, err := goph.Key(id, passphrase); err == nil {
+				chain = append(chain, auth)
 			}
 		}
 	}
-	// fallback to password from env if provided
+	// finally password if provided
 	if passAuth, ok := getPasswordAuth(); ok {
-		return passAuth, nil
+		chain = append(chain, passAuth)
 	}
-	return nil, errors.New("no valid SSH auth method found")
+	return chain
 }
 
 // fileExists checks if file exists
@@ -294,6 +293,16 @@ func uploadWithProgress(client *goph.Client, localPath string) (string, error) {
 	return rfile, nil
 }
 
+// composeUpdateCommand builds a single bash command to install, restart, and cleanup
+func composeUpdateCommand(execPath, service, tmpFile string) string {
+	dir := filepath.Dir(tmpFile)
+	// always cleanup on EXIT; install and restart run with set -e
+	return fmt.Sprintf(
+		"trap 'rm -f %s; rmdir %s 2>/dev/null || true' EXIT; set -e; sudo install -m 0755 -T %s %s && sudo systemctl restart %s",
+		tmpFile, dir, tmpFile, execPath, service,
+	)
+}
+
 // SystemdUpdate connects over SSH and prints ExecStart path
 func SystemdUpdate(localFile, remoteService, remoteHost string, remotePort int) error {
 	// parse user and port from host like user@host:port
@@ -316,37 +325,32 @@ func SystemdUpdate(localFile, remoteService, remoteHost string, remotePort int) 
 		cfg.Port = portOverride
 	}
 
-	// choose auth
-	auth, err := chooseAuth(cfg.IdentityFiles)
-	if err != nil {
-		return err
+	// build auth fallback chain and connect by trying each
+	authChain := buildAuthChain(cfg.IdentityFiles)
+	if len(authChain) == 0 {
+		return errors.New("no valid SSH auth method found")
 	}
 
-	// connect via goph with insecure host key (improve later with known_hosts)
-	client, err := goph.NewConn(&goph.Config{
-		User: cfg.User,
-		Addr: cfg.Hostname,
-		Port: uint(cfg.Port),
-		Auth: auth,
-		// NOTE: use insecure hostkey for now; consider known_hosts
-		Callback: ssh.InsecureIgnoreHostKey(),
-	})
-	if err != nil {
-		// Retry with password auth if authentication failed and password is set
-		if isAuthFailure(err) {
-			if passAuth, ok := getPasswordAuth(); ok {
-				client, err = goph.NewConn(&goph.Config{
-					User:     cfg.User,
-					Addr:     cfg.Hostname,
-					Port:     uint(cfg.Port),
-					Auth:     passAuth,
-					Callback: ssh.InsecureIgnoreHostKey(),
-				})
-			}
+	var client *goph.Client
+	var connErr error
+	for _, auth := range authChain {
+		client, connErr = goph.NewConn(&goph.Config{
+			User:     cfg.User,
+			Addr:     cfg.Hostname,
+			Port:     uint(cfg.Port),
+			Auth:     auth,
+			Callback: ssh.InsecureIgnoreHostKey(),
+		})
+		if connErr == nil {
+			break
 		}
-		if err != nil {
-			return err
+		// if it's an auth failure, continue to next method; otherwise abort
+		if !isAuthFailure(connErr) {
+			return connErr
 		}
+	}
+	if connErr != nil {
+		return connErr
 	}
 	defer client.Close()
 
@@ -365,19 +369,11 @@ func SystemdUpdate(localFile, remoteService, remoteHost string, remotePort int) 
 		return err
 	}
 
-	// prepare install command: preserve permissions and atomic replace
-	// use root paths and need sudo if not root
-	installer := fmt.Sprintf("sudo install -m 0755 -T %s %s", tmpRemoteFile, execPath)
-	out, err := client.Run(installer)
+	// run install + restart + cleanup in a single remote command to reduce network issues
+	combined := composeUpdateCommand(execPath, remoteService, tmpRemoteFile)
+	out, err := client.Run(combined)
 	if err != nil {
-		return fmt.Errorf("install failed: %v, output: %s", err, string(out))
-	}
-
-	// restart service with minimal output
-	restartCmd := fmt.Sprintf("sudo systemctl restart %s", remoteService)
-	out, err = client.Run(restartCmd)
-	if err != nil {
-		return fmt.Errorf("restart failed: %v, output: %s", err, string(out))
+		return fmt.Errorf("update failed: %v, output: %s", err, string(out))
 	}
 	fmt.Printf("Service restarted: %s\n", remoteService)
 
