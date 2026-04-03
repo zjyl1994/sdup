@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -21,4 +22,16 @@ func fileExists(path string) bool {
 		return false
 	}
 	return !st.IsDir()
+}
+
+func expandHomePath(path string, homeDir string) string {
+	path = strings.TrimSpace(path)
+	switch {
+	case path == "~":
+		return homeDir
+	case strings.HasPrefix(path, "~/"):
+		return filepath.Join(homeDir, path[2:])
+	default:
+		return path
+	}
 }

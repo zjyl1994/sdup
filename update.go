@@ -6,8 +6,10 @@ import (
 	"github.com/melbahja/goph"
 )
 
-func SystemdUpdate(localFile, remoteService, remoteHost string, remotePort int) error {
-	cfg, err := resolveConnectionConfig(remoteHost, remotePort)
+const defaultSSHPort = 22
+
+func SystemdUpdate(localFile, remoteService, remoteHost string, sshOptions sshCLIOptions) error {
+	cfg, err := resolveConnectionConfig(remoteHost, sshOptions)
 	if err != nil {
 		return err
 	}
@@ -21,27 +23,35 @@ func SystemdUpdate(localFile, remoteService, remoteHost string, remotePort int) 
 	return deploySystemdUpdate(client, localFile, remoteService)
 }
 
-func resolveConnectionConfig(remoteHost string, remotePort int) (*HostConfig, error) {
+func resolveConnectionConfig(remoteHost string, sshOptions sshCLIOptions) (*HostConfig, error) {
 	userOverride, hostAlias, portOverride := parseUserHostPort(remoteHost)
 
-	cfg, err := resolveSSHConfig(hostAlias, remotePort)
+	cfg, err := resolveSSHConfig(hostAlias, sshOptions.ConfigPath, sshOptions.ConfigPathSet)
 	if err != nil {
 		return nil, err
 	}
 
-	applyConnectionOverrides(cfg, userOverride, portOverride, remotePort)
+	if err := applyConnectionOverrides(cfg, userOverride, portOverride, sshOptions); err != nil {
+		return nil, err
+	}
+	if cfg.Port == 0 {
+		cfg.Port = defaultSSHPort
+	}
 	return cfg, nil
 }
 
-func applyConnectionOverrides(cfg *HostConfig, userOverride string, portOverride, remotePort int) {
+func applyConnectionOverrides(cfg *HostConfig, userOverride string, portOverride int, sshOptions sshCLIOptions) error {
 	if userOverride != "" {
 		cfg.User = userOverride
 	}
-	if remotePort > 0 {
-		cfg.Port = remotePort
-	} else if portOverride > 0 {
+	if portOverride > 0 {
 		cfg.Port = portOverride
 	}
+
+	if err := applySSHCLIOptions(cfg, sshOptions); err != nil {
+		return err
+	}
+	return nil
 }
 
 func deploySystemdUpdate(client *goph.Client, localFile, remoteService string) error {

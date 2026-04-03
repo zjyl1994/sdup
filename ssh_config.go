@@ -34,15 +34,17 @@ type sshConfigReader interface {
 	GetAll(string, string) ([]string, error)
 }
 
-func resolveSSHConfig(alias string, fallbackPort int) (*HostConfig, error) {
+func resolveSSHConfig(alias, configPath string, configPathSet bool) (*HostConfig, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
 
-	cfg := newHostConfig(alias, fallbackPort)
-	if parsed, err := loadSSHConfig(homeDir); err == nil {
+	cfg := newHostConfig(alias)
+	if parsed, err := loadSSHConfig(homeDir, configPath); err == nil {
 		applySSHConfigValues(cfg, parsed, alias, homeDir)
+	} else if configPathSet {
+		return nil, err
 	}
 
 	cfg.IdentityFiles = mergeIdentityFiles(cfg.IdentityFiles, defaultIdentityFiles(homeDir))
@@ -53,17 +55,22 @@ func resolveSSHConfig(alias string, fallbackPort int) (*HostConfig, error) {
 	return cfg, nil
 }
 
-func newHostConfig(alias string, fallbackPort int) *HostConfig {
+func newHostConfig(alias string) *HostConfig {
 	return &HostConfig{
 		User:          os.Getenv("USER"),
 		Hostname:      alias,
-		Port:          fallbackPort,
 		IdentityFiles: []string{},
 	}
 }
 
-func loadSSHConfig(homeDir string) (sshConfigReader, error) {
-	f, err := os.Open(filepath.Join(homeDir, ".ssh", "config"))
+func loadSSHConfig(homeDir, configPath string) (sshConfigReader, error) {
+	if strings.TrimSpace(configPath) == "" {
+		configPath = filepath.Join(homeDir, ".ssh", "config")
+	} else {
+		configPath = expandHomePath(configPath, homeDir)
+	}
+
+	f, err := os.Open(configPath)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +105,7 @@ func applySSHConfigValues(cfg *HostConfig, parsed sshConfigReader, alias, homeDi
 func expandIdentityFiles(files []string, homeDir string) []string {
 	expanded := make([]string, 0, len(files))
 	for _, file := range files {
-		expanded = append(expanded, strings.Replace(file, "~", homeDir, 1))
+		expanded = append(expanded, expandHomePath(file, homeDir))
 	}
 	return expanded
 }
@@ -110,7 +117,7 @@ func applyIdentityAgent(cfg *HostConfig, identityAgent, homeDir string) {
 		return
 	}
 	if strings.HasPrefix(identityAgent, "~") {
-		cfg.AgentSocket = strings.Replace(identityAgent, "~", homeDir, 1)
+		cfg.AgentSocket = expandHomePath(identityAgent, homeDir)
 		return
 	}
 	if identityAgent != "SSH_AUTH_SOCK" {
