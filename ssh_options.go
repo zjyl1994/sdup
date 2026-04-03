@@ -6,10 +6,10 @@ type sshCLIOptions = sshclient.Options
 
 func buildSSHCLIOptions(opts cliOptions) sshCLIOptions {
 	sshOptions := sshCLIOptions{
-		ConfigPath:    opts.sshConfigPath,
-		ConfigPathSet: opts.sshConfigSet,
-		IdentityFiles: append([]string(nil), opts.identityFiles...),
-		RawOptions:    append([]string(nil), opts.sshOptions...),
+		ConfigPath:       opts.sshConfigPath,
+		IdentityFiles:    append([]string(nil), opts.identityFiles...),
+		RawOptions:       append([]string(nil), opts.sshOptions...),
+		IgnoreKnownHosts: opts.ignoreKnownHosts,
 	}
 	if opts.sshPortSet {
 		sshOptions.Port = &opts.sshPort

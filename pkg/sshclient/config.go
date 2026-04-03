@@ -39,7 +39,7 @@ type sshConfigReader interface {
 func resolveConnectionConfig(remote string, options Options) (*hostConfig, error) {
 	userOverride, hostAlias, portOverride := parseUserHostPort(remote)
 
-	cfg, err := resolveSSHConfig(hostAlias, options.ConfigPath, options.ConfigPathSet)
+	cfg, err := resolveSSHConfig(hostAlias, options.ConfigPath)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +53,7 @@ func resolveConnectionConfig(remote string, options Options) (*hostConfig, error
 	return cfg, nil
 }
 
-func resolveSSHConfig(alias, configPath string, configPathSet bool) (*hostConfig, error) {
+func resolveSSHConfig(alias, configPath string) (*hostConfig, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -62,7 +62,7 @@ func resolveSSHConfig(alias, configPath string, configPathSet bool) (*hostConfig
 	cfg := newHostConfig(alias)
 	if parsed, err := loadSSHConfig(homeDir, configPath); err == nil {
 		applySSHConfigValues(cfg, parsed, alias, homeDir)
-	} else if configPathSet {
+	} else if strings.TrimSpace(configPath) != "" {
 		return nil, err
 	}
 

@@ -1,6 +1,15 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"errors"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/zjyl1994/sdup/pkg/sshclient"
+)
 
 func TestRemoteOpsExtractExecStartPath(t *testing.T) {
 	tests := []struct {
@@ -152,4 +161,96 @@ func TestRemoteOpsFormatByteSize(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUploadWithProgressCleansUpRemoteTempDirOnUploadError(t *testing.T) {
+	localFile := filepathForTempFile(t)
+	session := &fakeRemoteSession{
+		uploadErr:    errors.New("upload failed"),
+		mktempOutput: "/tmp/sdup.testdir\n",
+	}
+	var out bytes.Buffer
+
+	_, err := uploadWithProgressToWriter(session, localFile, &out)
+	if !errors.Is(err, session.uploadErr) {
+		t.Fatalf("uploadWithProgressToWriter error = %v, want %v", err, session.uploadErr)
+	}
+	if len(session.runCommands) != 2 {
+		t.Fatalf("len(runCommands) = %d, want %d", len(session.runCommands), 2)
+	}
+	if got := session.runCommands[1]; got != "rm -rf -- '/tmp/sdup.testdir'" {
+		t.Fatalf("cleanup command = %q, want %q", got, "rm -rf -- '/tmp/sdup.testdir'")
+	}
+}
+
+func TestUploadProgressRendererSkipsZeroRateDoneRedraw(t *testing.T) {
+	var out bytes.Buffer
+	renderer := &uploadProgressRenderer{
+		writer:             &out,
+		startedAt:          time.Now().Add(-2 * time.Second),
+		lastDisplayedAt:    time.Now().Add(-1 * time.Second),
+		lastDisplayedBytes: 1024,
+		lastRenderedWidth:  10,
+	}
+
+	renderer.Update(sshclient.UploadProgress{
+		Sent:  1024,
+		Total: 1024,
+		Done:  true,
+	})
+
+	if got := out.String(); got != "" {
+		t.Fatalf("renderer output = %q, want empty string", got)
+	}
+}
+
+func TestShellQuoteEscapesSingleQuotes(t *testing.T) {
+	got := shellQuote("/tmp/sdup.o'reilly")
+	want := "'/tmp/sdup.o'\"'\"'reilly'"
+
+	if got != want {
+		t.Fatalf("shellQuote() = %q, want %q", got, want)
+	}
+}
+
+type fakeRemoteSession struct {
+	runCommands  []string
+	uploadErr    error
+	mktempOutput string
+}
+
+func (s *fakeRemoteSession) Run(cmd string) ([]byte, error) {
+	s.runCommands = append(s.runCommands, cmd)
+	switch {
+	case cmd == "mktemp -d -t sdup.XXXXXX":
+		return []byte(s.mktempOutput), nil
+	case strings.HasPrefix(cmd, "rm -rf -- "):
+		return nil, nil
+	default:
+		return nil, nil
+	}
+}
+
+func (s *fakeRemoteSession) Upload(localPath, remotePath string, opts sshclient.UploadOptions) error {
+	return s.uploadErr
+}
+
+func (s *fakeRemoteSession) Close() error {
+	return nil
+}
+
+func filepathForTempFile(t *testing.T) string {
+	t.Helper()
+
+	f, err := os.CreateTemp(t.TempDir(), "upload-*")
+	if err != nil {
+		t.Fatalf("CreateTemp returned error: %v", err)
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString("content"); err != nil {
+		t.Fatalf("WriteString returned error: %v", err)
+	}
+
+	return f.Name()
 }

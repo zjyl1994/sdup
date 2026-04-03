@@ -91,8 +91,7 @@ Host prod
 `)
 
 	cfg, err := resolveConnectionConfig("prod", Options{
-		ConfigPath:    configPath,
-		ConfigPathSet: true,
+		ConfigPath: configPath,
 	})
 	if err != nil {
 		t.Fatalf("resolveConnectionConfig returned error: %v", err)
@@ -161,8 +160,7 @@ Host prod
 
 func TestResolveConnectionConfigErrorsForMissingExplicitConfig(t *testing.T) {
 	_, err := resolveConnectionConfig("prod", Options{
-		ConfigPath:    filepath.Join(t.TempDir(), "missing-config"),
-		ConfigPathSet: true,
+		ConfigPath: filepath.Join(t.TempDir(), "missing-config"),
 	})
 	if err == nil {
 		t.Fatalf("resolveConnectionConfig returned nil error, want error")

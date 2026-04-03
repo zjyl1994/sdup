@@ -45,28 +45,35 @@ func extractExecStartPath(line string) (string, error) {
 }
 
 func uploadWithProgress(session sshclient.Session, localPath string) (string, error) {
+	return uploadWithProgressToWriter(session, localPath, os.Stdout)
+}
+
+func uploadWithProgressToWriter(session sshclient.Session, localPath string, writer io.Writer) (string, error) {
 	totalSize, err := localFileSize(localPath)
 	if err != nil {
 		return "", err
 	}
 
-	remoteFilePath, err := createRemoteTempFilePath(session, localPath)
+	remoteDir, remoteFilePath, err := createRemoteTempFilePath(session, localPath)
 	if err != nil {
 		return "", err
 	}
 
-	renderer := newUploadProgressRenderer(os.Stdout)
+	renderer := newUploadProgressRenderer(writer)
 	renderer.Start(totalSize)
 
 	if err := session.Upload(localPath, remoteFilePath, sshclient.UploadOptions{
 		OnProgress: renderer.Update,
 	}); err != nil {
 		renderer.Finish()
+		if cleanupErr := cleanupRemoteTempDir(session, remoteDir); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
 		return "", err
 	}
 
 	renderer.Finish()
-	fmt.Printf("Upload complete: %s -> %s\n", localPath, remoteFilePath)
+	fmt.Fprintf(writer, "Upload complete: %s -> %s\n", localPath, remoteFilePath)
 	return remoteFilePath, nil
 }
 
@@ -78,18 +85,31 @@ func localFileSize(localPath string) (int64, error) {
 	return stat.Size(), nil
 }
 
-func createRemoteTempFilePath(session sshclient.Session, localPath string) (string, error) {
+func createRemoteTempFilePath(session sshclient.Session, localPath string) (string, string, error) {
 	out, err := session.Run("mktemp -d -t sdup.XXXXXX")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	remoteDir := strings.TrimSpace(string(out))
-	return filepath.Join(remoteDir, filepath.Base(localPath)), nil
+	return remoteDir, filepath.Join(remoteDir, filepath.Base(localPath)), nil
+}
+
+func cleanupRemoteTempDir(session sshclient.Session, remoteDir string) error {
+	if strings.TrimSpace(remoteDir) == "" {
+		return nil
+	}
+
+	_, err := session.Run("rm -rf -- " + shellQuote(remoteDir))
+	if err != nil {
+		return fmt.Errorf("cleanup remote temp dir %q: %w", remoteDir, err)
+	}
+	return nil
 }
 
 type uploadProgressRenderer struct {
 	writer             io.Writer
+	startedAt          time.Time
 	lastDisplayedAt    time.Time
 	lastDisplayedBytes int64
 	lastRenderedWidth  int
@@ -101,7 +121,9 @@ func newUploadProgressRenderer(writer io.Writer) *uploadProgressRenderer {
 
 func (r *uploadProgressRenderer) Start(totalSize int64) {
 	fmt.Fprint(r.writer, renderUploadStart(totalSize))
-	r.lastDisplayedAt = time.Now()
+	now := time.Now()
+	r.startedAt = now
+	r.lastDisplayedAt = now
 }
 
 func (r *uploadProgressRenderer) Update(progress sshclient.UploadProgress) {
@@ -110,12 +132,24 @@ func (r *uploadProgressRenderer) Update(progress sshclient.UploadProgress) {
 		return
 	}
 
+	deltaBytes := progress.Sent - r.lastDisplayedBytes
+	if progress.Done && deltaBytes == 0 && r.lastRenderedWidth > 0 {
+		return
+	}
+
 	elapsed := now.Sub(r.lastDisplayedAt)
 	if elapsed <= 0 {
 		elapsed = time.Nanosecond
 	}
 
-	rate := float64(progress.Sent-r.lastDisplayedBytes) / elapsed.Seconds()
+	rate := float64(deltaBytes) / elapsed.Seconds()
+	if progress.Done && deltaBytes == 0 {
+		totalElapsed := now.Sub(r.startedAt)
+		if totalElapsed <= 0 {
+			totalElapsed = time.Nanosecond
+		}
+		rate = float64(progress.Sent) / totalElapsed.Seconds()
+	}
 	line := renderUploadProgress(progress.Sent, progress.Total, rate)
 	output, renderedWidth := formatProgressOutput(line, r.lastRenderedWidth)
 	fmt.Fprint(r.writer, output)
@@ -174,6 +208,10 @@ func formatProgressOutput(line string, previousWidth int) (string, int) {
 		renderedWidth = previousWidth
 	}
 	return line + "\r", renderedWidth
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func formatByteSize(size float64) string {

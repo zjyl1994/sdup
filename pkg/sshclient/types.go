@@ -1,11 +1,11 @@
 package sshclient
 
 type Options struct {
-	Port          *int
-	ConfigPath    string
-	ConfigPathSet bool
-	IdentityFiles []string
-	RawOptions    []string
+	Port             *int
+	ConfigPath       string
+	IdentityFiles    []string
+	RawOptions       []string
+	IgnoreKnownHosts bool
 }
 
 type UploadProgress struct {

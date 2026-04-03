@@ -15,6 +15,7 @@ func TestCLIParseArgs(t *testing.T) {
 		wantConfigSet bool
 		wantIDs       []string
 		wantSSHOpts   []string
+		wantIgnoreKH  bool
 		wantService   string
 		wantLocalPath string
 		wantRemote    string
@@ -76,6 +77,15 @@ func TestCLIParseArgs(t *testing.T) {
 			wantRemote:    "prod",
 		},
 		{
+			name:          "ignore known hosts flag after positional args",
+			args:          []string{"./local", "prod", "-K"},
+			wantPort:      22,
+			wantPortSet:   false,
+			wantIgnoreKH:  true,
+			wantLocalPath: "./local",
+			wantRemote:    "prod",
+		},
+		{
 			name:          "flags after positional args",
 			args:          []string{"./local", "prod", "-p", "2205", "-s", "api"},
 			wantPort:      2205,
@@ -120,6 +130,9 @@ func TestCLIParseArgs(t *testing.T) {
 			}
 			if !equalStringSlices([]string(opts.sshOptions), tt.wantSSHOpts) {
 				t.Fatalf("sshOptions = %v, want %v", []string(opts.sshOptions), tt.wantSSHOpts)
+			}
+			if opts.ignoreKnownHosts != tt.wantIgnoreKH {
+				t.Fatalf("ignoreKnownHosts = %v, want %v", opts.ignoreKnownHosts, tt.wantIgnoreKH)
 			}
 			if opts.remoteService != tt.wantService {
 				t.Fatalf("remoteService = %q, want %q", opts.remoteService, tt.wantService)
@@ -213,11 +226,13 @@ func newCLIFlagSetForTest() *flag.FlagSet {
 	var config string
 	var ids stringSliceFlag
 	var sshOptions stringSliceFlag
+	var ignoreKnownHosts bool
 	var service string
 	fs.IntVar(&port, "p", 22, "SSH port")
 	fs.StringVar(&config, "f", "", "SSH config file")
 	fs.Var(&ids, "i", "SSH identity file")
 	fs.Var(&sshOptions, "o", "SSH option in key=value form")
+	fs.BoolVar(&ignoreKnownHosts, "k", false, "Ignore SSH known_hosts host key verification")
 	fs.StringVar(&service, "s", "", "Remote service")
 	return fs
 }

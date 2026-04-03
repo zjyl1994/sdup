@@ -8,17 +8,18 @@ import (
 	"strings"
 )
 
-const usageText = "Usage: sdup [flags] <local_path> <remote_host>\nFlags are case-insensitive and may appear before or after positional args: -p/-P <port>, -s <service>, -i <identity>, -o <key=value>, -f/-F <config>\n"
+const usageText = "Usage: sdup [flags] <local_path> <remote_host>\nFlags are case-insensitive and may appear before or after positional args: -p/-P <port>, -s <service>, -i <identity>, -o <key=value>, -f/-F <config>, -k/-K (ignore known_hosts)\n"
 
 type cliOptions struct {
-	sshPort       int
-	sshPortSet    bool
-	sshConfigPath string
-	sshConfigSet  bool
-	identityFiles stringSliceFlag
-	sshOptions    stringSliceFlag
-	remoteService string
-	args          []string
+	sshPort          int
+	sshPortSet       bool
+	sshConfigPath    string
+	sshConfigSet     bool
+	identityFiles    stringSliceFlag
+	sshOptions       stringSliceFlag
+	ignoreKnownHosts bool
+	remoteService    string
+	args             []string
 }
 
 func parseCLIArgs(args []string) (cliOptions, error) {
@@ -30,6 +31,7 @@ func parseCLIArgs(args []string) (cliOptions, error) {
 	fs.StringVar(&opts.sshConfigPath, "f", "", "SSH config file")
 	fs.Var(&opts.identityFiles, "i", "SSH identity file")
 	fs.Var(&opts.sshOptions, "o", "SSH option in key=value form")
+	fs.BoolVar(&opts.ignoreKnownHosts, "k", false, "Ignore SSH known_hosts host key verification")
 	fs.StringVar(&opts.remoteService, "s", "", "Remote service")
 
 	if err := fs.Parse(reorderCLIArgs(fs, args)); err != nil {

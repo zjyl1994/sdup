@@ -2,23 +2,40 @@ package sshclient
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 
 	"github.com/melbahja/goph"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 type gophSession struct {
 	client *goph.Client
 }
 
+var (
+	hostKeyCallbackFn = goph.DefaultKnownHosts
+	newConnFn         = goph.NewConn
+	dialAgentSocketFn = net.Dial
+)
+
 func Dial(remote string, options Options) (Session, error) {
 	cfg, err := resolveConnectionConfig(remote, options)
 	if err != nil {
 		return nil, err
+	}
+
+	hostKeyCallback := ssh.InsecureIgnoreHostKey()
+	if !options.IgnoreKnownHosts {
+		hostKeyCallback, err = hostKeyCallbackFn()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	authChain := buildAuthChain(cfg)
@@ -29,12 +46,12 @@ func Dial(remote string, options Options) (Session, error) {
 	var client *goph.Client
 	var connErr error
 	for _, auth := range authChain {
-		client, connErr = goph.NewConn(&goph.Config{
+		client, connErr = newConnFn(&goph.Config{
 			User:     cfg.User,
 			Addr:     cfg.Hostname,
 			Port:     uint(cfg.Port),
 			Auth:     auth,
-			Callback: ssh.InsecureIgnoreHostKey(),
+			Callback: hostKeyCallback,
 		})
 		if connErr == nil {
 			return &gophSession{client: client}, nil
@@ -128,19 +145,12 @@ func resolveAgentSocket(cfg *hostConfig) string {
 }
 
 func useAgentWithSocket(sock string) (goph.Auth, error) {
-	origin, hadOrigin := os.LookupEnv("SSH_AUTH_SOCK")
-	if err := os.Setenv("SSH_AUTH_SOCK", sock); err != nil {
-		return nil, err
+	sshAgent, err := dialAgentSocketFn("unix", sock)
+	if err != nil {
+		return nil, fmt.Errorf("could not find ssh agent: %w", err)
 	}
-
-	auth, err := goph.UseAgent()
-	if hadOrigin {
-		_ = os.Setenv("SSH_AUTH_SOCK", origin)
-	} else {
-		_ = os.Unsetenv("SSH_AUTH_SOCK")
-	}
-
-	return auth, err
+	signers := agent.NewClient(sshAgent).Signers
+	return goph.Auth{ssh.PublicKeysCallback(signers)}, nil
 }
 
 func getKeyPassphrase() string {
