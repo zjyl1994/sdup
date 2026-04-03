@@ -19,10 +19,12 @@ import (
 // HostConfig holds resolved SSH connection parameters
 // simple English comments as requested
 type HostConfig struct {
-	User          string
-	Hostname      string
-	Port          int
-	IdentityFiles []string
+	User           string
+	Hostname       string
+	Port           int
+	IdentityFiles  []string
+	IdentitiesOnly bool
+	AgentSocket    string
 }
 
 // resolveSSHConfig tries to use local ssh config to fill host params
@@ -69,22 +71,35 @@ func resolveSSHConfig(alias string, fallbackPort int) (*HostConfig, error) {
 					cfg.IdentityFiles = append(cfg.IdentityFiles, id)
 				}
 			}
-		}
-	}
-
-	// default identity files if not present: scan ~/.ssh
-	if len(cfg.IdentityFiles) == 0 {
-		cfg.IdentityFiles = findDefaultIdentityFiles(homeDir)
-		// still empty: fallback to common names
-		if len(cfg.IdentityFiles) == 0 {
-			cfg.IdentityFiles = []string{
-				filepath.Join(homeDir, ".ssh", "id_ed25519"),
-				filepath.Join(homeDir, ".ssh", "id_rsa"),
-				filepath.Join(homeDir, ".ssh", "id_ecdsa"),
-				filepath.Join(homeDir, ".ssh", "id_dsa"),
+			if ioVal, _ := parsed.Get(host, "IdentitiesOnly"); parseSSHBool(ioVal) {
+				cfg.IdentitiesOnly = true
+			}
+			if ia, _ := parsed.Get(host, "IdentityAgent"); strings.TrimSpace(ia) != "" {
+				ia = strings.TrimSpace(ia)
+				if strings.EqualFold(ia, "none") {
+					cfg.AgentSocket = "none"
+				} else if strings.HasPrefix(ia, "~") {
+					cfg.AgentSocket = strings.Replace(ia, "~", homeDir, 1)
+				} else if ia != "SSH_AUTH_SOCK" {
+					cfg.AgentSocket = ia
+				}
 			}
 		}
 	}
+
+	defaultIDs := findDefaultIdentityFiles(homeDir)
+	if len(defaultIDs) == 0 {
+		defaultIDs = []string{
+			filepath.Join(homeDir, ".ssh", "id_rsa"),
+			filepath.Join(homeDir, ".ssh", "id_ecdsa"),
+			filepath.Join(homeDir, ".ssh", "id_ecdsa_sk"),
+			filepath.Join(homeDir, ".ssh", "id_ed25519"),
+			filepath.Join(homeDir, ".ssh", "id_ed25519_sk"),
+			filepath.Join(homeDir, ".ssh", "id_xmss"),
+			filepath.Join(homeDir, ".ssh", "id_dsa"),
+		}
+	}
+	cfg.IdentityFiles = mergeIdentityFiles(cfg.IdentityFiles, defaultIDs)
 
 	// default user if empty
 	if cfg.User == "" {
@@ -105,11 +120,11 @@ func parseInt(s string) (int, error) {
 }
 
 // buildAuthChain constructs ordered auth methods: keys -> agent -> password
-func buildAuthChain(ids []string) []goph.Auth {
+func buildAuthChain(cfg *HostConfig) []goph.Auth {
 	chain := []goph.Auth{}
 	// key files first
 	passphrase := getKeyPassphrase()
-	for _, id := range ids {
+	for _, id := range cfg.IdentityFiles {
 		if fileExists(id) {
 			if auth, err := goph.Key(id, passphrase); err == nil {
 				chain = append(chain, auth)
@@ -117,9 +132,15 @@ func buildAuthChain(ids []string) []goph.Auth {
 		}
 	}
 	// then agent if available and usable
-	if os.Getenv("SSH_AUTH_SOCK") != "" {
-		if auth, err := goph.UseAgent(); err == nil {
-			chain = append(chain, auth)
+	if !cfg.IdentitiesOnly && cfg.AgentSocket != "none" {
+		sock := cfg.AgentSocket
+		if sock == "" {
+			sock = os.Getenv("SSH_AUTH_SOCK")
+		}
+		if strings.TrimSpace(sock) != "" {
+			if auth, err := useAgentWithSocket(sock); err == nil {
+				chain = append(chain, auth)
+			}
 		}
 	}
 	// finally password if provided
@@ -141,37 +162,68 @@ func fileExists(path string) bool {
 // findDefaultIdentityFiles scans ~/.ssh for typical private keys
 func findDefaultIdentityFiles(homeDir string) []string {
 	sshDir := filepath.Join(homeDir, ".ssh")
-	entries, err := os.ReadDir(sshDir)
-	if err != nil {
-		return nil
+	candidates := []string{
+		"id_rsa",
+		"id_ecdsa",
+		"id_ecdsa_sk",
+		"id_ed25519",
+		"id_ed25519_sk",
+		"id_xmss",
+		"id_dsa",
 	}
-	add := func(set map[string]struct{}, p string) {
+	out := make([]string, 0, len(candidates))
+	for _, name := range candidates {
+		p := filepath.Join(sshDir, name)
 		if fileExists(p) {
-			set[p] = struct{}{}
+			out = append(out, p)
 		}
-	}
-	keys := make(map[string]struct{})
-	// common names
-	add(keys, filepath.Join(sshDir, "id_ed25519"))
-	add(keys, filepath.Join(sshDir, "id_rsa"))
-	add(keys, filepath.Join(sshDir, "id_ecdsa"))
-	add(keys, filepath.Join(sshDir, "id_dsa"))
-	// scan id_* files excluding .pub
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if strings.HasPrefix(name, "id_") && !strings.HasSuffix(name, ".pub") {
-			add(keys, filepath.Join(sshDir, name))
-		}
-	}
-	// convert to slice
-	out := make([]string, 0, len(keys))
-	for p := range keys {
-		out = append(out, p)
 	}
 	return out
+}
+
+func parseSSHBool(v string) bool {
+	v = strings.TrimSpace(strings.ToLower(v))
+	return v == "yes" || v == "true" || v == "on" || v == "1"
+}
+
+func mergeIdentityFiles(primary []string, secondary []string) []string {
+	out := make([]string, 0, len(primary)+len(secondary))
+	seen := map[string]struct{}{}
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if strings.EqualFold(id, "none") {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, id := range primary {
+		add(id)
+	}
+	for _, id := range secondary {
+		add(id)
+	}
+	return out
+}
+
+func useAgentWithSocket(sock string) (goph.Auth, error) {
+	origin, hadOrigin := os.LookupEnv("SSH_AUTH_SOCK")
+	if err := os.Setenv("SSH_AUTH_SOCK", sock); err != nil {
+		return nil, err
+	}
+	auth, err := goph.UseAgent()
+	if hadOrigin {
+		_ = os.Setenv("SSH_AUTH_SOCK", origin)
+	} else {
+		_ = os.Unsetenv("SSH_AUTH_SOCK")
+	}
+	return auth, err
 }
 
 // getKeyPassphrase returns passphrase from env if provided
@@ -326,7 +378,7 @@ func SystemdUpdate(localFile, remoteService, remoteHost string, remotePort int) 
 	}
 
 	// build auth fallback chain and connect by trying each
-	authChain := buildAuthChain(cfg.IdentityFiles)
+	authChain := buildAuthChain(cfg)
 	if len(authChain) == 0 {
 		return errors.New("no valid SSH auth method found")
 	}
