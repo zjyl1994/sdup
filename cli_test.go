@@ -75,6 +75,26 @@ func TestCLIParseArgs(t *testing.T) {
 			wantLocalPath: "./local",
 			wantRemote:    "prod",
 		},
+		{
+			name:          "flags after positional args",
+			args:          []string{"./local", "prod", "-p", "2205", "-s", "api"},
+			wantPort:      2205,
+			wantPortSet:   true,
+			wantService:   "api",
+			wantLocalPath: "./local",
+			wantRemote:    "prod",
+		},
+		{
+			name:          "interleaved positional args and case insensitive flags",
+			args:          []string{"./local", "-P2206", "prod", "-Sworker", "-F", "ssh_config"},
+			wantPort:      2206,
+			wantPortSet:   true,
+			wantConfig:    "ssh_config",
+			wantConfigSet: true,
+			wantService:   "worker",
+			wantLocalPath: "./local",
+			wantRemote:    "prod",
+		},
 	}
 
 	for _, tt := range tests {
@@ -118,6 +138,21 @@ func TestCLINormalizeArgs(t *testing.T) {
 	fs := newCLIFlagSetForTest()
 	got := normalizeCLIArgs(fs, []string{"-P2222", "-Sapi", "--", "-Fconfig"})
 	want := []string{"-p", "2222", "-s", "api", "--", "-Fconfig"}
+
+	if len(got) != len(want) {
+		t.Fatalf("len(got) = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestCLIReorderArgs(t *testing.T) {
+	fs := newCLIFlagSetForTest()
+	got := reorderCLIArgs(fs, []string{"./local", "prod", "-P2222", "-Sapi"})
+	want := []string{"-p", "2222", "-s", "api", "./local", "prod"}
 
 	if len(got) != len(want) {
 		t.Fatalf("len(got) = %d, want %d", len(got), len(want))

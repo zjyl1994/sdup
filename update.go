@@ -8,19 +8,29 @@ import (
 
 const defaultSSHPort = 22
 
+var (
+	resolveConnectionConfigFn = resolveConnectionConfig
+	dialSSHFn                 = dialSSH
+	deploySystemdUpdateFn     = deploySystemdUpdate
+)
+
 func SystemdUpdate(localFile, remoteService, remoteHost string, sshOptions sshCLIOptions) error {
-	cfg, err := resolveConnectionConfig(remoteHost, sshOptions)
+	if err := validateLocalFile(localFile); err != nil {
+		return err
+	}
+
+	cfg, err := resolveConnectionConfigFn(remoteHost, sshOptions)
 	if err != nil {
 		return err
 	}
 
-	client, err := dialSSH(cfg)
+	client, err := dialSSHFn(cfg)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	return deploySystemdUpdate(client, localFile, remoteService)
+	return deploySystemdUpdateFn(client, localFile, remoteService)
 }
 
 func resolveConnectionConfig(remoteHost string, sshOptions sshCLIOptions) (*HostConfig, error) {

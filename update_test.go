@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/melbahja/goph"
+)
 
 func TestUpdateApplyConnectionOverrides(t *testing.T) {
 	cfg := &HostConfig{User: "ubuntu", Port: 1000}
@@ -37,5 +42,47 @@ func TestUpdateApplyConnectionOverridesAppliesRawOptionOverride(t *testing.T) {
 	}
 	if cfg.Hostname != "10.0.0.10" {
 		t.Fatalf("hostname = %q, want %q", cfg.Hostname, "10.0.0.10")
+	}
+}
+
+func TestSystemdUpdateSkipsSSHWhenLocalFileMissing(t *testing.T) {
+	origResolve := resolveConnectionConfigFn
+	origDial := dialSSHFn
+	origDeploy := deploySystemdUpdateFn
+	defer func() {
+		resolveConnectionConfigFn = origResolve
+		dialSSHFn = origDial
+		deploySystemdUpdateFn = origDeploy
+	}()
+
+	resolveCalled := false
+	dialCalled := false
+	deployCalled := false
+
+	resolveConnectionConfigFn = func(remoteHost string, sshOptions sshCLIOptions) (*HostConfig, error) {
+		resolveCalled = true
+		return &HostConfig{}, nil
+	}
+	dialSSHFn = func(cfg *HostConfig) (*goph.Client, error) {
+		dialCalled = true
+		return nil, errors.New("unexpected dial")
+	}
+	deploySystemdUpdateFn = func(client *goph.Client, localFile, remoteService string) error {
+		deployCalled = true
+		return nil
+	}
+
+	err := SystemdUpdate("/tmp/definitely-missing-sdup-binary", "api", "prod", sshCLIOptions{})
+	if err == nil {
+		t.Fatal("SystemdUpdate returned nil error for missing file")
+	}
+	if resolveCalled {
+		t.Fatal("resolveConnectionConfig should not be called when local file is missing")
+	}
+	if dialCalled {
+		t.Fatal("dialSSH should not be called when local file is missing")
+	}
+	if deployCalled {
+		t.Fatal("deploySystemdUpdate should not be called when local file is missing")
 	}
 }

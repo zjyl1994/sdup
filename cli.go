@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const usageText = "Usage: sdup [flags] <local_path> <remote_host>\nFlags are case-insensitive: -p/-P <port>, -s <service>, -i <identity>, -o <key=value>, -f/-F <config>\n"
+const usageText = "Usage: sdup [flags] <local_path> <remote_host>\nFlags are case-insensitive and may appear before or after positional args: -p/-P <port>, -s <service>, -i <identity>, -o <key=value>, -f/-F <config>\n"
 
 type cliOptions struct {
 	sshPort       int
@@ -32,7 +32,7 @@ func parseCLIArgs(args []string) (cliOptions, error) {
 	fs.Var(&opts.sshOptions, "o", "SSH option in key=value form")
 	fs.StringVar(&opts.remoteService, "s", "", "Remote service")
 
-	if err := fs.Parse(normalizeCLIArgs(fs, args)); err != nil {
+	if err := fs.Parse(reorderCLIArgs(fs, args)); err != nil {
 		return cliOptions{}, err
 	}
 	fs.Visit(func(f *flag.Flag) {
@@ -49,6 +49,39 @@ func parseCLIArgs(args []string) (cliOptions, error) {
 
 	opts.args = fs.Args()
 	return opts, nil
+}
+
+func reorderCLIArgs(fs *flag.FlagSet, args []string) []string {
+	normalized := normalizeCLIArgs(fs, args)
+	reordered := make([]string, 0, len(normalized))
+	positionals := make([]string, 0, len(normalized))
+
+	for i := 0; i < len(normalized); i++ {
+		arg := normalized[i]
+		if arg == "--" {
+			positionals = append(positionals, normalized[i+1:]...)
+			break
+		}
+
+		isFlag, expectsValue, hasInlineValue := classifyCLIArg(fs, arg)
+		if isFlag {
+			reordered = append(reordered, arg)
+			if expectsValue && !hasInlineValue && i+1 < len(normalized) {
+				i++
+				reordered = append(reordered, normalized[i])
+			}
+			continue
+		}
+
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			reordered = append(reordered, arg)
+			continue
+		}
+
+		positionals = append(positionals, arg)
+	}
+
+	return append(reordered, positionals...)
 }
 
 func normalizeCLIArgs(fs *flag.FlagSet, args []string) []string {
@@ -81,6 +114,31 @@ func normalizeCLIArgs(fs *flag.FlagSet, args []string) []string {
 	}
 
 	return normalized
+}
+
+func classifyCLIArg(fs *flag.FlagSet, arg string) (bool, bool, bool) {
+	switch arg {
+	case "-h", "-help", "--help":
+		return true, false, false
+	}
+
+	if !strings.HasPrefix(arg, "-") || arg == "-" {
+		return false, false, false
+	}
+
+	name := strings.TrimLeft(arg, "-")
+	hasInlineValue := false
+	if idx := strings.Index(name, "="); idx >= 0 {
+		name = name[:idx]
+		hasInlineValue = true
+	}
+
+	f := fs.Lookup(name)
+	if f == nil {
+		return false, false, false
+	}
+
+	return true, !isBoolFlag(f), hasInlineValue
 }
 
 func normalizeShortFlagName(arg string) string {
