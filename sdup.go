@@ -104,22 +104,22 @@ func parseInt(s string) (int, error) {
 	return n, nil
 }
 
-// buildAuthChain constructs ordered auth methods: agent -> keys -> password
+// buildAuthChain constructs ordered auth methods: keys -> agent -> password
 func buildAuthChain(ids []string) []goph.Auth {
 	chain := []goph.Auth{}
-	// agent first if available and usable
-	if os.Getenv("SSH_AUTH_SOCK") != "" {
-		if auth, err := goph.UseAgent(); err == nil {
-			chain = append(chain, auth)
-		}
-	}
-	// then key files
+	// key files first
 	passphrase := getKeyPassphrase()
 	for _, id := range ids {
 		if fileExists(id) {
 			if auth, err := goph.Key(id, passphrase); err == nil {
 				chain = append(chain, auth)
 			}
+		}
+	}
+	// then agent if available and usable
+	if os.Getenv("SSH_AUTH_SOCK") != "" {
+		if auth, err := goph.UseAgent(); err == nil {
+			chain = append(chain, auth)
 		}
 	}
 	// finally password if provided
