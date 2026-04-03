@@ -1,4 +1,4 @@
-package main
+package sshclient
 
 import (
 	"os"
@@ -17,7 +17,7 @@ Host prod
     IdentityAgent ~/.ssh/agent.sock
 `)
 
-	cfg, err := resolveConnectionConfig("prod", sshCLIOptions{})
+	cfg, err := resolveConnectionConfig("prod", Options{})
 	if err != nil {
 		t.Fatalf("resolveConnectionConfig returned error: %v", err)
 	}
@@ -49,7 +49,7 @@ Host prod
     Port 2200
 `)
 
-	cfg, err := resolveConnectionConfig("prod:2300", sshCLIOptions{})
+	cfg, err := resolveConnectionConfig("prod:2300", Options{})
 	if err != nil {
 		t.Fatalf("resolveConnectionConfig returned error: %v", err)
 	}
@@ -58,7 +58,7 @@ Host prod
 	}
 
 	cliPort := 2400
-	cfg, err = resolveConnectionConfig("prod:2300", sshCLIOptions{Port: &cliPort})
+	cfg, err = resolveConnectionConfig("prod:2300", Options{Port: &cliPort})
 	if err != nil {
 		t.Fatalf("resolveConnectionConfig returned error: %v", err)
 	}
@@ -73,12 +73,12 @@ Host prod
     HostName 10.10.10.10
 `)
 
-	cfg, err := resolveConnectionConfig("prod", sshCLIOptions{})
+	cfg, err := resolveConnectionConfig("prod", Options{})
 	if err != nil {
 		t.Fatalf("resolveConnectionConfig returned error: %v", err)
 	}
-	if cfg.Port != defaultSSHPort {
-		t.Fatalf("Port = %d, want %d", cfg.Port, defaultSSHPort)
+	if cfg.Port != defaultPort {
+		t.Fatalf("Port = %d, want %d", cfg.Port, defaultPort)
 	}
 }
 
@@ -90,7 +90,7 @@ Host prod
     Port 2201
 `)
 
-	cfg, err := resolveConnectionConfig("prod", sshCLIOptions{
+	cfg, err := resolveConnectionConfig("prod", Options{
 		ConfigPath:    configPath,
 		ConfigPathSet: true,
 	})
@@ -118,7 +118,7 @@ Host prod
     IdentityFile ~/.ssh/from-config
 `)
 
-	cfg, err := resolveConnectionConfig("prod", sshCLIOptions{
+	cfg, err := resolveConnectionConfig("prod", Options{
 		IdentityFiles: []string{"~/.ssh/from-cli"},
 		RawOptions: []string{
 			"HostName=10.30.40.50",
@@ -160,12 +160,33 @@ Host prod
 }
 
 func TestResolveConnectionConfigErrorsForMissingExplicitConfig(t *testing.T) {
-	_, err := resolveConnectionConfig("prod", sshCLIOptions{
+	_, err := resolveConnectionConfig("prod", Options{
 		ConfigPath:    filepath.Join(t.TempDir(), "missing-config"),
 		ConfigPathSet: true,
 	})
 	if err == nil {
 		t.Fatalf("resolveConnectionConfig returned nil error, want error")
+	}
+}
+
+func TestApplyConnectionOverridesAppliesRawOptionOverride(t *testing.T) {
+	cfg := &hostConfig{User: "ubuntu", Port: 1000, Hostname: "prod"}
+
+	err := applyConnectionOverrides(cfg, "root", 2222, Options{
+		RawOptions: []string{"User=deploy", "Port=2200", "HostName=10.0.0.10"},
+	})
+	if err != nil {
+		t.Fatalf("applyConnectionOverrides returned error: %v", err)
+	}
+
+	if cfg.User != "deploy" {
+		t.Fatalf("user = %q, want %q", cfg.User, "deploy")
+	}
+	if cfg.Port != 2200 {
+		t.Fatalf("port = %d, want %d", cfg.Port, 2200)
+	}
+	if cfg.Hostname != "10.0.0.10" {
+		t.Fatalf("hostname = %q, want %q", cfg.Hostname, "10.0.0.10")
 	}
 }
 

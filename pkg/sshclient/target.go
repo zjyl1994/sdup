@@ -1,9 +1,7 @@
-package main
+package sshclient
 
 import "strings"
 
-// parseUserHostPort splits "user@host:port" and returns user, host, port.
-// For ipv6 with port, use "user@[2001:db8::1]:2222".
 func parseUserHostPort(spec string) (string, string, int) {
 	user, hostPort := splitUserFromHostSpec(spec)
 	host, port := splitHostPort(hostPort)

@@ -3,15 +3,12 @@ package main
 import (
 	"fmt"
 
-	"github.com/melbahja/goph"
+	"github.com/zjyl1994/sdup/pkg/sshclient"
 )
 
-const defaultSSHPort = 22
-
 var (
-	resolveConnectionConfigFn = resolveConnectionConfig
-	dialSSHFn                 = dialSSH
-	deploySystemdUpdateFn     = deploySystemdUpdate
+	dialSSHSessionFn      = sshclient.Dial
+	deploySystemdUpdateFn = deploySystemdUpdate
 )
 
 func SystemdUpdate(localFile, remoteService, remoteHost string, sshOptions sshCLIOptions) error {
@@ -19,64 +16,28 @@ func SystemdUpdate(localFile, remoteService, remoteHost string, sshOptions sshCL
 		return err
 	}
 
-	cfg, err := resolveConnectionConfigFn(remoteHost, sshOptions)
+	session, err := dialSSHSessionFn(remoteHost, sshOptions)
 	if err != nil {
 		return err
 	}
+	defer session.Close()
 
-	client, err := dialSSHFn(cfg)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-
-	return deploySystemdUpdateFn(client, localFile, remoteService)
+	return deploySystemdUpdateFn(session, localFile, remoteService)
 }
 
-func resolveConnectionConfig(remoteHost string, sshOptions sshCLIOptions) (*HostConfig, error) {
-	userOverride, hostAlias, portOverride := parseUserHostPort(remoteHost)
-
-	cfg, err := resolveSSHConfig(hostAlias, sshOptions.ConfigPath, sshOptions.ConfigPathSet)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := applyConnectionOverrides(cfg, userOverride, portOverride, sshOptions); err != nil {
-		return nil, err
-	}
-	if cfg.Port == 0 {
-		cfg.Port = defaultSSHPort
-	}
-	return cfg, nil
-}
-
-func applyConnectionOverrides(cfg *HostConfig, userOverride string, portOverride int, sshOptions sshCLIOptions) error {
-	if userOverride != "" {
-		cfg.User = userOverride
-	}
-	if portOverride > 0 {
-		cfg.Port = portOverride
-	}
-
-	if err := applySSHCLIOptions(cfg, sshOptions); err != nil {
-		return err
-	}
-	return nil
-}
-
-func deploySystemdUpdate(client *goph.Client, localFile, remoteService string) error {
-	execPath, err := fetchExecStartPath(client, remoteService)
+func deploySystemdUpdate(session sshclient.Session, localFile, remoteService string) error {
+	execPath, err := fetchExecStartPath(session, remoteService)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("ExecStart path: %s\n", execPath)
 
-	tmpRemoteFile, err := uploadWithProgress(client, localFile)
+	tmpRemoteFile, err := uploadWithProgress(session, localFile)
 	if err != nil {
 		return err
 	}
 
-	out, err := client.Run(composeUpdateCommand(execPath, remoteService, tmpRemoteFile))
+	out, err := session.Run(composeUpdateCommand(execPath, remoteService, tmpRemoteFile))
 	if err != nil {
 		return fmt.Errorf("update failed: %v, output: %s", err, string(out))
 	}

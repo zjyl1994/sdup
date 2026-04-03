@@ -1,13 +1,16 @@
-package main
+package sshclient
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	sshconfig "github.com/kevinburke/ssh_config"
 )
+
+const defaultPort = 22
 
 var defaultIdentityFileNames = []string{
 	"id_rsa",
@@ -19,8 +22,7 @@ var defaultIdentityFileNames = []string{
 	"id_dsa",
 }
 
-// HostConfig holds resolved SSH connection parameters.
-type HostConfig struct {
+type hostConfig struct {
 	User           string
 	Hostname       string
 	Port           int
@@ -34,7 +36,24 @@ type sshConfigReader interface {
 	GetAll(string, string) ([]string, error)
 }
 
-func resolveSSHConfig(alias, configPath string, configPathSet bool) (*HostConfig, error) {
+func resolveConnectionConfig(remote string, options Options) (*hostConfig, error) {
+	userOverride, hostAlias, portOverride := parseUserHostPort(remote)
+
+	cfg, err := resolveSSHConfig(hostAlias, options.ConfigPath, options.ConfigPathSet)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := applyConnectionOverrides(cfg, userOverride, portOverride, options); err != nil {
+		return nil, err
+	}
+	if cfg.Port == 0 {
+		cfg.Port = defaultPort
+	}
+	return cfg, nil
+}
+
+func resolveSSHConfig(alias, configPath string, configPathSet bool) (*hostConfig, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -55,8 +74,8 @@ func resolveSSHConfig(alias, configPath string, configPathSet bool) (*HostConfig
 	return cfg, nil
 }
 
-func newHostConfig(alias string) *HostConfig {
-	return &HostConfig{
+func newHostConfig(alias string) *hostConfig {
+	return &hostConfig{
 		User:          os.Getenv("USER"),
 		Hostname:      alias,
 		IdentityFiles: []string{},
@@ -79,7 +98,7 @@ func loadSSHConfig(homeDir, configPath string) (sshConfigReader, error) {
 	return sshconfig.Decode(bufio.NewReader(f))
 }
 
-func applySSHConfigValues(cfg *HostConfig, parsed sshConfigReader, alias, homeDir string) {
+func applySSHConfigValues(cfg *hostConfig, parsed sshConfigReader, alias, homeDir string) {
 	if hostname, _ := parsed.Get(alias, "HostName"); hostname != "" {
 		cfg.Hostname = hostname
 	}
@@ -110,7 +129,7 @@ func expandIdentityFiles(files []string, homeDir string) []string {
 	return expanded
 }
 
-func applyIdentityAgent(cfg *HostConfig, identityAgent, homeDir string) {
+func applyIdentityAgent(cfg *hostConfig, identityAgent, homeDir string) {
 	identityAgent = strings.TrimSpace(identityAgent)
 	if strings.EqualFold(identityAgent, "none") {
 		cfg.AgentSocket = "none"
@@ -151,6 +170,107 @@ func findDefaultIdentityFiles(homeDir string) []string {
 		}
 	}
 	return paths
+}
+
+func applyConnectionOverrides(cfg *hostConfig, userOverride string, portOverride int, options Options) error {
+	if userOverride != "" {
+		cfg.User = userOverride
+	}
+	if portOverride > 0 {
+		cfg.Port = portOverride
+	}
+
+	if err := applyOptions(cfg, options); err != nil {
+		return err
+	}
+	return nil
+}
+
+func applyOptions(cfg *hostConfig, options Options) error {
+	if err := applyRawOptions(cfg, options.RawOptions); err != nil {
+		return err
+	}
+	if err := applyIdentityFileOverrides(cfg, options.IdentityFiles); err != nil {
+		return err
+	}
+	if options.Port != nil {
+		cfg.Port = *options.Port
+	}
+	return nil
+}
+
+func applyRawOptions(cfg *hostConfig, rawOptions []string) error {
+	if len(rawOptions) == 0 {
+		return nil
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	for _, raw := range rawOptions {
+		key, value, err := parseSSHOption(raw)
+		if err != nil {
+			return err
+		}
+
+		switch strings.ToLower(key) {
+		case "hostname":
+			cfg.Hostname = strings.TrimSpace(value)
+		case "user":
+			cfg.User = strings.TrimSpace(value)
+		case "port":
+			port, err := parseInt(value)
+			if err != nil {
+				return fmt.Errorf("invalid -o Port value %q: %w", value, err)
+			}
+			cfg.Port = port
+		case "identityfile":
+			cfg.IdentityFiles = mergeIdentityFiles([]string{expandHomePath(value, homeDir)}, cfg.IdentityFiles)
+		case "identitiesonly":
+			cfg.IdentitiesOnly = parseSSHBool(value)
+		case "identityagent":
+			applyIdentityAgent(cfg, value, homeDir)
+		default:
+			return fmt.Errorf("unsupported -o option: %s", key)
+		}
+	}
+
+	return nil
+}
+
+func parseSSHOption(spec string) (string, string, error) {
+	parts := strings.SplitN(spec, "=", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("-o expects KEY=VALUE, got %q", spec)
+	}
+
+	key := strings.TrimSpace(parts[0])
+	value := strings.TrimSpace(parts[1])
+	if key == "" {
+		return "", "", fmt.Errorf("-o expects KEY=VALUE, got %q", spec)
+	}
+
+	return key, value, nil
+}
+
+func applyIdentityFileOverrides(cfg *hostConfig, identityFiles []string) error {
+	if len(identityFiles) == 0 {
+		return nil
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	expanded := make([]string, 0, len(identityFiles))
+	for _, identityFile := range identityFiles {
+		expanded = append(expanded, expandHomePath(identityFile, homeDir))
+	}
+	cfg.IdentityFiles = mergeIdentityFiles(expanded, cfg.IdentityFiles)
+	return nil
 }
 
 func parseSSHBool(v string) bool {

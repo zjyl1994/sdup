@@ -10,8 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/melbahja/goph"
-	"github.com/pkg/sftp"
+	"github.com/zjyl1994/sdup/pkg/sshclient"
 )
 
 var execStartPathPattern = regexp.MustCompile(`path=([^ ;]+)`)
@@ -19,8 +18,8 @@ var execStartPathPattern = regexp.MustCompile(`path=([^ ;]+)`)
 const progressRefreshInterval = 200 * time.Millisecond
 const progressBarWidth = 24
 
-func fetchExecStartPath(client *goph.Client, unit string) (string, error) {
-	out, err := client.Run(fmt.Sprintf("systemctl show %s -p ExecStart", unit))
+func fetchExecStartPath(session sshclient.Session, unit string) (string, error) {
+	out, err := session.Run(fmt.Sprintf("systemctl show %s -p ExecStart", unit))
 	if err != nil {
 		return "", err
 	}
@@ -45,56 +44,42 @@ func extractExecStartPath(line string) (string, error) {
 	return "", errors.New("ExecStart path not found")
 }
 
-func uploadWithProgress(client *goph.Client, localPath string) (string, error) {
-	localFile, totalSize, err := openLocalFileForUpload(localPath)
-	if err != nil {
-		return "", err
-	}
-	defer localFile.Close()
-
-	sftpClient, err := client.NewSftp(sftp.MaxPacket(1 << 15))
-	if err != nil {
-		return "", err
-	}
-	defer sftpClient.Close()
-
-	remoteFilePath, err := createRemoteTempFilePath(client, localPath)
+func uploadWithProgress(session sshclient.Session, localPath string) (string, error) {
+	totalSize, err := localFileSize(localPath)
 	if err != nil {
 		return "", err
 	}
 
-	remoteFile, err := sftpClient.Create(remoteFilePath)
+	remoteFilePath, err := createRemoteTempFilePath(session, localPath)
 	if err != nil {
 		return "", err
 	}
-	defer remoteFile.Close()
 
-	fmt.Print(renderUploadStart(totalSize))
-	if err := copyWithProgress(localFile, remoteFile, totalSize); err != nil {
+	renderer := newUploadProgressRenderer(os.Stdout)
+	renderer.Start(totalSize)
+
+	if err := session.Upload(localPath, remoteFilePath, sshclient.UploadOptions{
+		OnProgress: renderer.Update,
+	}); err != nil {
+		renderer.Finish()
 		return "", err
 	}
 
-	fmt.Printf("\nUpload complete: %s -> %s\n", localPath, remoteFilePath)
+	renderer.Finish()
+	fmt.Printf("Upload complete: %s -> %s\n", localPath, remoteFilePath)
 	return remoteFilePath, nil
 }
 
-func openLocalFileForUpload(localPath string) (*os.File, int64, error) {
-	localFile, err := os.Open(localPath)
+func localFileSize(localPath string) (int64, error) {
+	stat, err := os.Stat(localPath)
 	if err != nil {
-		return nil, 0, err
+		return 0, err
 	}
-
-	stat, err := localFile.Stat()
-	if err != nil {
-		localFile.Close()
-		return nil, 0, err
-	}
-
-	return localFile, stat.Size(), nil
+	return stat.Size(), nil
 }
 
-func createRemoteTempFilePath(client *goph.Client, localPath string) (string, error) {
-	out, err := client.Run("mktemp -d -t sdup.XXXXXX")
+func createRemoteTempFilePath(session sshclient.Session, localPath string) (string, error) {
+	out, err := session.Run("mktemp -d -t sdup.XXXXXX")
 	if err != nil {
 		return "", err
 	}
@@ -103,56 +88,47 @@ func createRemoteTempFilePath(client *goph.Client, localPath string) (string, er
 	return filepath.Join(remoteDir, filepath.Base(localPath)), nil
 }
 
-func copyWithProgress(src io.Reader, dst io.Writer, totalSize int64) error {
-	buf := make([]byte, 128*1024)
-	var sent int64
-	lastDisplayedAt := time.Now()
-	lastDisplayedBytes := int64(0)
-	lastRenderedWidth := 0
+type uploadProgressRenderer struct {
+	writer             io.Writer
+	lastDisplayedAt    time.Time
+	lastDisplayedBytes int64
+	lastRenderedWidth  int
+}
 
-	printProgress := func(force bool) {
-		now := time.Now()
-		if !force && now.Sub(lastDisplayedAt) < progressRefreshInterval {
-			return
-		}
+func newUploadProgressRenderer(writer io.Writer) *uploadProgressRenderer {
+	return &uploadProgressRenderer{writer: writer}
+}
 
-		elapsed := now.Sub(lastDisplayedAt)
-		if elapsed <= 0 {
-			elapsed = time.Nanosecond
-		}
+func (r *uploadProgressRenderer) Start(totalSize int64) {
+	fmt.Fprint(r.writer, renderUploadStart(totalSize))
+	r.lastDisplayedAt = time.Now()
+}
 
-		rate := float64(sent-lastDisplayedBytes) / elapsed.Seconds()
-		line := renderUploadProgress(sent, totalSize, rate)
-		output, renderedWidth := formatProgressOutput(line, lastRenderedWidth)
-		fmt.Print(output)
-		lastRenderedWidth = renderedWidth
-		lastDisplayedAt = now
-		lastDisplayedBytes = sent
+func (r *uploadProgressRenderer) Update(progress sshclient.UploadProgress) {
+	now := time.Now()
+	if !progress.Done && now.Sub(r.lastDisplayedAt) < progressRefreshInterval {
+		return
 	}
 
-	for {
-		n, readErr := src.Read(buf)
-		if n > 0 {
-			written, writeErr := dst.Write(buf[:n])
-			if writeErr != nil {
-				return writeErr
-			}
-			if written != n {
-				return io.ErrShortWrite
-			}
-
-			sent += int64(n)
-			printProgress(false)
-		}
-
-		if readErr != nil {
-			if readErr == io.EOF {
-				printProgress(true)
-				return nil
-			}
-			return readErr
-		}
+	elapsed := now.Sub(r.lastDisplayedAt)
+	if elapsed <= 0 {
+		elapsed = time.Nanosecond
 	}
+
+	rate := float64(progress.Sent-r.lastDisplayedBytes) / elapsed.Seconds()
+	line := renderUploadProgress(progress.Sent, progress.Total, rate)
+	output, renderedWidth := formatProgressOutput(line, r.lastRenderedWidth)
+	fmt.Fprint(r.writer, output)
+	r.lastRenderedWidth = renderedWidth
+	r.lastDisplayedAt = now
+	r.lastDisplayedBytes = progress.Sent
+}
+
+func (r *uploadProgressRenderer) Finish() {
+	if r.lastRenderedWidth == 0 {
+		return
+	}
+	fmt.Fprintln(r.writer)
 }
 
 func renderUploadProgress(sent, totalSize int64, rate float64) string {
