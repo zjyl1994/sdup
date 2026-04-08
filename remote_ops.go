@@ -44,16 +44,11 @@ func extractExecStartPath(line string) (string, error) {
 	return "", errors.New("ExecStart path not found")
 }
 
-func uploadWithProgress(session sshclient.Session, localPath string) (string, error) {
-	return uploadWithProgressToWriter(session, localPath, os.Stdout)
+func uploadWithProgress(session sshclient.Session, localPath string, totalSize int64) (string, error) {
+	return uploadWithProgressToWriter(session, localPath, totalSize, os.Stdout)
 }
 
-func uploadWithProgressToWriter(session sshclient.Session, localPath string, writer io.Writer) (string, error) {
-	totalSize, err := localFileSize(localPath)
-	if err != nil {
-		return "", err
-	}
-
+func uploadWithProgressToWriter(session sshclient.Session, localPath string, totalSize int64, writer io.Writer) (string, error) {
 	remoteDir, remoteFilePath, err := createRemoteTempFilePath(session, localPath)
 	if err != nil {
 		return "", err
@@ -120,7 +115,6 @@ func newUploadProgressRenderer(writer io.Writer) *uploadProgressRenderer {
 }
 
 func (r *uploadProgressRenderer) Start(totalSize int64) {
-	fmt.Fprint(r.writer, renderUploadStart(totalSize))
 	now := time.Now()
 	r.startedAt = now
 	r.lastDisplayedAt = now

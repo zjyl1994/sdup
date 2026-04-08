@@ -171,7 +171,12 @@ func TestUploadWithProgressCleansUpRemoteTempDirOnUploadError(t *testing.T) {
 	}
 	var out bytes.Buffer
 
-	_, err := uploadWithProgressToWriter(session, localFile, &out)
+	totalSize, err := localFileSize(localFile)
+	if err != nil {
+		t.Fatalf("localFileSize returned error: %v", err)
+	}
+
+	_, err = uploadWithProgressToWriter(session, localFile, totalSize, &out)
 	if !errors.Is(err, session.uploadErr) {
 		t.Fatalf("uploadWithProgressToWriter error = %v, want %v", err, session.uploadErr)
 	}
