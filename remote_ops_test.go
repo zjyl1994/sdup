@@ -188,6 +188,50 @@ func TestUploadWithProgressCleansUpRemoteTempDirOnUploadError(t *testing.T) {
 	}
 }
 
+func TestDeploySystemdUpdateCleansUpRemoteTempDirWhenRunFails(t *testing.T) {
+	localFile := filepathForTempFile(t)
+	session := &fakeRemoteSession{
+		execStartOutput: "ExecStart=/usr/local/bin/api --serve\n",
+		mktempOutput:    "/tmp/sdup.testdir\n",
+		updateErr:       errors.New("run failed"),
+	}
+
+	totalSize, err := localFileSize(localFile)
+	if err != nil {
+		t.Fatalf("localFileSize returned error: %v", err)
+	}
+
+	err = deploySystemdUpdate(session, localFile, "api", totalSize)
+	if err == nil {
+		t.Fatal("deploySystemdUpdate returned nil error")
+	}
+	if got := session.runCommands[len(session.runCommands)-1]; got != "rm -rf -- '/tmp/sdup.testdir'" {
+		t.Fatalf("cleanup command = %q, want %q", got, "rm -rf -- '/tmp/sdup.testdir'")
+	}
+}
+
+func TestDeploySystemdUpdateDoesNotCleanupTwiceAfterSuccess(t *testing.T) {
+	localFile := filepathForTempFile(t)
+	session := &fakeRemoteSession{
+		execStartOutput: "ExecStart=/usr/local/bin/api --serve\n",
+		mktempOutput:    "/tmp/sdup.testdir\n",
+	}
+
+	totalSize, err := localFileSize(localFile)
+	if err != nil {
+		t.Fatalf("localFileSize returned error: %v", err)
+	}
+
+	if err := deploySystemdUpdate(session, localFile, "api", totalSize); err != nil {
+		t.Fatalf("deploySystemdUpdate returned error: %v", err)
+	}
+	for _, cmd := range session.runCommands {
+		if cmd == "rm -rf -- '/tmp/sdup.testdir'" {
+			t.Fatalf("unexpected duplicate cleanup command in %v", session.runCommands)
+		}
+	}
+}
+
 func TestUploadProgressRendererSkipsZeroRateDoneRedraw(t *testing.T) {
 	var out bytes.Buffer
 	renderer := &uploadProgressRenderer{
@@ -219,16 +263,23 @@ func TestShellQuoteEscapesSingleQuotes(t *testing.T) {
 }
 
 type fakeRemoteSession struct {
-	runCommands  []string
-	uploadErr    error
-	mktempOutput string
+	runCommands     []string
+	uploadErr       error
+	mktempOutput    string
+	execStartOutput string
+	updateOutput    []byte
+	updateErr       error
 }
 
 func (s *fakeRemoteSession) Run(cmd string) ([]byte, error) {
 	s.runCommands = append(s.runCommands, cmd)
 	switch {
+	case strings.HasPrefix(cmd, "systemctl show "):
+		return []byte(s.execStartOutput), nil
 	case cmd == "mktemp -d -t sdup.XXXXXX":
 		return []byte(s.mktempOutput), nil
+	case strings.HasPrefix(cmd, "trap 'rm -f "):
+		return s.updateOutput, s.updateErr
 	case strings.HasPrefix(cmd, "rm -rf -- "):
 		return nil, nil
 	default:

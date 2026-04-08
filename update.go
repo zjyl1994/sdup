@@ -39,15 +39,17 @@ func deploySystemdUpdate(session sshclient.Session, localFile, remoteService str
 	}
 	fmt.Printf("ExecStart path: %s\n", execPath)
 
-	tmpRemoteFile, err := uploadWithProgress(session, localFile, totalSize)
+	staging, err := uploadWithProgress(session, localFile, totalSize)
 	if err != nil {
 		return err
 	}
+	defer staging.Cleanup(session)
 
-	out, err := session.Run(composeUpdateCommand(execPath, remoteService, tmpRemoteFile))
+	out, err := session.Run(composeUpdateCommand(execPath, remoteService, staging))
 	if err != nil {
 		return fmt.Errorf("update failed: %v, output: %s", err, string(out))
 	}
+	staging.MarkRemoteClean()
 
 	fmt.Printf("Service restarted: %s\n", remoteService)
 	return nil

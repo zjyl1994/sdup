@@ -26,6 +26,26 @@ func fetchExecStartPath(session sshclient.Session, unit string) (string, error) 
 	return extractExecStartPath(strings.TrimSpace(string(out)))
 }
 
+type remoteStaging struct {
+	dir         string
+	filePath    string
+	remoteClean bool
+}
+
+func (s *remoteStaging) Cleanup(session sshclient.Session) error {
+	if s == nil || s.remoteClean {
+		return nil
+	}
+	return cleanupRemoteTempDir(session, s.dir)
+}
+
+func (s *remoteStaging) MarkRemoteClean() {
+	if s == nil {
+		return
+	}
+	s.remoteClean = true
+}
+
 func extractExecStartPath(line string) (string, error) {
 	if !strings.HasPrefix(line, "ExecStart=") {
 		return "", errors.New("unexpected systemctl output")
@@ -44,32 +64,32 @@ func extractExecStartPath(line string) (string, error) {
 	return "", errors.New("ExecStart path not found")
 }
 
-func uploadWithProgress(session sshclient.Session, localPath string, totalSize int64) (string, error) {
+func uploadWithProgress(session sshclient.Session, localPath string, totalSize int64) (*remoteStaging, error) {
 	return uploadWithProgressToWriter(session, localPath, totalSize, os.Stdout)
 }
 
-func uploadWithProgressToWriter(session sshclient.Session, localPath string, totalSize int64, writer io.Writer) (string, error) {
-	remoteDir, remoteFilePath, err := createRemoteTempFilePath(session, localPath)
+func uploadWithProgressToWriter(session sshclient.Session, localPath string, totalSize int64, writer io.Writer) (*remoteStaging, error) {
+	staging, err := createRemoteTempFilePath(session, localPath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	renderer := newUploadProgressRenderer(writer)
 	renderer.Start(totalSize)
 
-	if err := session.Upload(localPath, remoteFilePath, sshclient.UploadOptions{
+	if err := session.Upload(localPath, staging.filePath, sshclient.UploadOptions{
 		OnProgress: renderer.Update,
 	}); err != nil {
 		renderer.Finish()
-		if cleanupErr := cleanupRemoteTempDir(session, remoteDir); cleanupErr != nil {
-			return "", errors.Join(err, cleanupErr)
+		if cleanupErr := staging.Cleanup(session); cleanupErr != nil {
+			return nil, errors.Join(err, cleanupErr)
 		}
-		return "", err
+		return nil, err
 	}
 
 	renderer.Finish()
-	fmt.Fprintf(writer, "Upload complete: %s -> %s\n", localPath, remoteFilePath)
-	return remoteFilePath, nil
+	fmt.Fprintf(writer, "Upload complete: %s -> %s\n", localPath, staging.filePath)
+	return staging, nil
 }
 
 func localFileSize(localPath string) (int64, error) {
@@ -80,14 +100,17 @@ func localFileSize(localPath string) (int64, error) {
 	return stat.Size(), nil
 }
 
-func createRemoteTempFilePath(session sshclient.Session, localPath string) (string, string, error) {
+func createRemoteTempFilePath(session sshclient.Session, localPath string) (*remoteStaging, error) {
 	out, err := session.Run("mktemp -d -t sdup.XXXXXX")
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 
 	remoteDir := strings.TrimSpace(string(out))
-	return remoteDir, filepath.Join(remoteDir, filepath.Base(localPath)), nil
+	return &remoteStaging{
+		dir:      remoteDir,
+		filePath: filepath.Join(remoteDir, filepath.Base(localPath)),
+	}, nil
 }
 
 func cleanupRemoteTempDir(session sshclient.Session, remoteDir string) error {
@@ -221,8 +244,9 @@ func formatByteSize(size float64) string {
 	return fmt.Sprintf("%.1f %s", size, units[unit])
 }
 
-func composeUpdateCommand(execPath, service, tmpFile string) string {
-	dir := filepath.Dir(tmpFile)
+func composeUpdateCommand(execPath, service string, staging *remoteStaging) string {
+	tmpFile := staging.filePath
+	dir := staging.dir
 	return fmt.Sprintf(
 		"trap 'rm -f %s; rmdir %s 2>/dev/null || true' EXIT; set -e; sudo install -m 0755 -T %s %s && sudo systemctl restart %s",
 		tmpFile, dir, tmpFile, execPath, service,
