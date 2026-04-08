@@ -17,6 +17,7 @@ func TestCLIParseArgs(t *testing.T) {
 		wantSSHOpts   []string
 		wantIgnoreKH  bool
 		wantService   string
+		wantWrite     bool
 		wantLocalPath string
 		wantRemote    string
 	}{
@@ -105,6 +106,13 @@ func TestCLIParseArgs(t *testing.T) {
 			wantLocalPath: "./local",
 			wantRemote:    "prod",
 		},
+		{
+			name:        "write config without positional args",
+			args:        []string{"-W"},
+			wantPort:    22,
+			wantPortSet: false,
+			wantWrite:   true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -137,11 +145,24 @@ func TestCLIParseArgs(t *testing.T) {
 			if opts.remoteService != tt.wantService {
 				t.Fatalf("remoteService = %q, want %q", opts.remoteService, tt.wantService)
 			}
-			if got := opts.args[0]; got != tt.wantLocalPath {
-				t.Fatalf("local_path = %q, want %q", got, tt.wantLocalPath)
+			if opts.writeConfig != tt.wantWrite {
+				t.Fatalf("writeConfig = %v, want %v", opts.writeConfig, tt.wantWrite)
 			}
-			if got := opts.args[1]; got != tt.wantRemote {
-				t.Fatalf("remote_host = %q, want %q", got, tt.wantRemote)
+			if tt.wantLocalPath != "" || len(opts.args) > 0 {
+				if len(opts.args) < 1 {
+					t.Fatalf("missing local_path, want %q", tt.wantLocalPath)
+				}
+				if got := opts.args[0]; got != tt.wantLocalPath {
+					t.Fatalf("local_path = %q, want %q", got, tt.wantLocalPath)
+				}
+			}
+			if tt.wantRemote != "" || len(opts.args) > 1 {
+				if len(opts.args) < 2 {
+					t.Fatalf("missing remote_host, want %q", tt.wantRemote)
+				}
+				if got := opts.args[1]; got != tt.wantRemote {
+					t.Fatalf("remote_host = %q, want %q", got, tt.wantRemote)
+				}
 			}
 		})
 	}
@@ -228,12 +249,14 @@ func newCLIFlagSetForTest() *flag.FlagSet {
 	var sshOptions stringSliceFlag
 	var ignoreKnownHosts bool
 	var service string
+	var writeConfig bool
 	fs.IntVar(&port, "p", 22, "SSH port")
 	fs.StringVar(&config, "f", "", "SSH config file")
 	fs.Var(&ids, "i", "SSH identity file")
 	fs.Var(&sshOptions, "o", "SSH option in key=value form")
 	fs.BoolVar(&ignoreKnownHosts, "k", false, "Ignore SSH known_hosts host key verification")
 	fs.StringVar(&service, "s", "", "Remote service")
+	fs.BoolVar(&writeConfig, "w", false, "Write repo-local .sdup.toml from current arguments and exit")
 	return fs
 }
 
