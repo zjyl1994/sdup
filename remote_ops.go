@@ -76,8 +76,7 @@ func cleanupBackupBinary(session sshclient.Session, backupPath string) error {
 }
 
 func installUploadedBinary(session sshclient.Session, stagingPath, execPath string) error {
-	_, err := runRemoteCommand(session, installBinaryCommand(stagingPath, execPath), fmt.Sprintf("install uploaded binary to %q", execPath))
-	return err
+	return installBinary(session, stagingPath, execPath, fmt.Sprintf("install uploaded binary to %q", execPath))
 }
 
 func restartService(session sshclient.Session, service string) error {
@@ -133,17 +132,55 @@ func fetchRecentServiceLogs(session sshclient.Session, service string, lines int
 	return trimmed, nil
 }
 
-func rollbackBinary(session sshclient.Session, service, backupPath, execPath string) (string, error) {
-	if _, err := runRemoteCommand(session, installBinaryCommand(backupPath, execPath), fmt.Sprintf("restore backup for service %q", service)); err != nil {
+func rollbackBinary(session sshclient.Session, service, backupPath, execPath string, waitWindow time.Duration) (string, error) {
+	if err := installBinary(session, backupPath, execPath, fmt.Sprintf("restore backup for service %q", service)); err != nil {
 		return backupPath, err
 	}
 	if err := restartService(session, service); err != nil {
 		return backupPath, err
 	}
-	if err := verifyServiceActive(session, service); err != nil {
+	if err := verifyServiceStable(session, service, waitWindow); err != nil {
 		return backupPath, err
 	}
 	return backupPath, nil
+}
+
+func installBinary(session sshclient.Session, srcPath, dstPath, action string) (err error) {
+	tempPath, err := createInstallTempPath(session, dstPath)
+	if err != nil {
+		return err
+	}
+	cleanupTemp := true
+	defer func() {
+		if !cleanupTemp {
+			return
+		}
+		cleanupErr := cleanupInstallTempPath(session, tempPath)
+		if cleanupErr == nil {
+			return
+		}
+		if err == nil {
+			err = cleanupErr
+			return
+		}
+		err = errors.Join(err, cleanupErr)
+	}()
+
+	if _, err := runRemoteCommand(session, copyBinaryCommand(srcPath, tempPath), fmt.Sprintf("stage binary for %s", action)); err != nil {
+		return err
+	}
+	if _, err := runRemoteCommand(session, copyFileModeCommand(dstPath, tempPath), fmt.Sprintf("preserve mode for %s", action)); err != nil {
+		return err
+	}
+	if _, err := runRemoteCommand(session, copyFileOwnerCommand(dstPath, tempPath), fmt.Sprintf("preserve owner for %s", action)); err != nil {
+		return err
+	}
+	if _, err := runRemoteCommand(session, moveRemoteFileCommand(tempPath, dstPath), action); err != nil {
+		return err
+	}
+
+	cleanupTemp = false
+	return nil
 }
 
 type remoteStaging struct {
@@ -235,6 +272,22 @@ func cleanupRemoteTempDir(session sshclient.Session, remoteDir string) error {
 		return fmt.Errorf("cleanup remote temp dir %q: %w", remoteDir, err)
 	}
 	return nil
+}
+
+func createInstallTempPath(session sshclient.Session, dstPath string) (string, error) {
+	out, err := runRemoteCommand(session, createInstallTempFileCommand(dstPath), fmt.Sprintf("create install temp file for %q", dstPath))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func cleanupInstallTempPath(session sshclient.Session, tempPath string) error {
+	if strings.TrimSpace(tempPath) == "" {
+		return nil
+	}
+	_, err := runRemoteCommand(session, removeRemoteFileCommand(tempPath), fmt.Sprintf("cleanup install temp file %q", tempPath))
+	return err
 }
 
 func runRemoteCommand(session sshclient.Session, cmd, action string) ([]byte, error) {
@@ -380,8 +433,21 @@ func copyBinaryCommand(execPath, backupPath string) string {
 	return fmt.Sprintf("sudo -n cp -- %s %s", shellQuote(execPath), shellQuote(backupPath))
 }
 
-func installBinaryCommand(srcPath, dstPath string) string {
-	return fmt.Sprintf("sudo -n install -m 0755 -T %s %s", shellQuote(srcPath), shellQuote(dstPath))
+func createInstallTempFileCommand(dstPath string) string {
+	templatePath := filepath.Join(filepath.Dir(dstPath), "."+filepath.Base(dstPath)+".sdup.XXXXXX")
+	return "sudo -n mktemp " + shellQuote(templatePath)
+}
+
+func copyFileModeCommand(referencePath, targetPath string) string {
+	return fmt.Sprintf("sudo -n chmod --reference=%s -- %s", shellQuote(referencePath), shellQuote(targetPath))
+}
+
+func copyFileOwnerCommand(referencePath, targetPath string) string {
+	return fmt.Sprintf("sudo -n chown --reference=%s -- %s", shellQuote(referencePath), shellQuote(targetPath))
+}
+
+func moveRemoteFileCommand(srcPath, dstPath string) string {
+	return fmt.Sprintf("sudo -n mv -fT -- %s %s", shellQuote(srcPath), shellQuote(dstPath))
 }
 
 func restartServiceCommand(service string) string {

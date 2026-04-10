@@ -4,15 +4,15 @@ import "github.com/zjyl1994/sdup/pkg/sshclient"
 
 type sshCLIOptions = sshclient.Options
 
-func buildSSHCLIOptions(opts cliOptions) sshCLIOptions {
+func buildSSHOptions(inv resolvedInvocation) sshCLIOptions {
 	sshOptions := sshCLIOptions{
-		ConfigPath:       opts.sshConfigPath,
-		IdentityFiles:    append([]string(nil), opts.identityFiles...),
-		RawOptions:       append([]string(nil), opts.sshOptions...),
-		IgnoreKnownHosts: opts.ignoreKnownHosts,
+		ConfigPath:       inv.ssh.configPath,
+		IdentityFiles:    cloneStrings(inv.ssh.identityFiles),
+		RawOptions:       cloneStrings(inv.ssh.rawOptions),
+		IgnoreKnownHosts: inv.ssh.ignoreKnownHosts,
 	}
-	if opts.sshPortSet {
-		sshOptions.Port = &opts.sshPort
+	if inv.ssh.port != nil {
+		sshOptions.Port = intPtr(*inv.ssh.port)
 	}
 	return sshOptions
 }

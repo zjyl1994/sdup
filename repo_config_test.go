@@ -34,7 +34,7 @@ func TestResolveInvocationOptionsUsesRepoConfig(t *testing.T) {
 		t.Fatalf("MkdirAll returned error: %v", err)
 	}
 
-	opts, repoCtx, err := resolveInvocationOptions(cliOptions{}, cwd)
+	opts, repoCtx, err := resolveInvocationOptions(cliInput{}, cwd)
 	if err != nil {
 		t.Fatalf("resolveInvocationOptions returned error: %v", err)
 	}
@@ -42,29 +42,29 @@ func TestResolveInvocationOptionsUsesRepoConfig(t *testing.T) {
 	if repoCtx.rootDir != repoDir {
 		t.Fatalf("rootDir = %q, want %q", repoCtx.rootDir, repoDir)
 	}
-	if got := opts.args[0]; got != filepath.Join(repoDir, "build", "api") {
+	if got := opts.localPath; got != filepath.Join(repoDir, "build", "api") {
 		t.Fatalf("local_path = %q, want %q", got, filepath.Join(repoDir, "build", "api"))
 	}
-	if got := opts.args[1]; got != "prod" {
+	if got := opts.remoteHost; got != "prod" {
 		t.Fatalf("remote_host = %q, want %q", got, "prod")
 	}
 	if opts.remoteService != "api" {
 		t.Fatalf("remoteService = %q, want %q", opts.remoteService, "api")
 	}
-	if !opts.sshPortSet || opts.sshPort != 2200 {
-		t.Fatalf("ssh port = (%v, %d), want (true, 2200)", opts.sshPortSet, opts.sshPort)
+	if opts.ssh.port == nil || *opts.ssh.port != 2200 {
+		t.Fatalf("ssh port = %v, want 2200", opts.ssh.port)
 	}
-	if !opts.sshConfigSet || opts.sshConfigPath != filepath.Join(repoDir, "ssh_config") {
-		t.Fatalf("sshConfigPath = %q, want %q", opts.sshConfigPath, filepath.Join(repoDir, "ssh_config"))
+	if opts.ssh.configPath != filepath.Join(repoDir, "ssh_config") {
+		t.Fatalf("sshConfigPath = %q, want %q", opts.ssh.configPath, filepath.Join(repoDir, "ssh_config"))
 	}
-	if !opts.ignoreKnownHosts {
+	if !opts.ssh.ignoreKnownHosts {
 		t.Fatal("ignoreKnownHosts = false, want true")
 	}
-	if !equalStringSlices([]string(opts.identityFiles), []string{filepath.Join(repoDir, "keys", "id_ed25519")}) {
-		t.Fatalf("identityFiles = %v", []string(opts.identityFiles))
+	if !equalStringSlices(opts.ssh.identityFiles, []string{filepath.Join(repoDir, "keys", "id_ed25519")}) {
+		t.Fatalf("identityFiles = %v", opts.ssh.identityFiles)
 	}
-	if !equalStringSlices([]string(opts.sshOptions), []string{"User=deploy", "HostName=10.0.0.10"}) {
-		t.Fatalf("sshOptions = %v", []string(opts.sshOptions))
+	if !equalStringSlices(opts.ssh.rawOptions, []string{"User=deploy", "HostName=10.0.0.10"}) {
+		t.Fatalf("sshOptions = %v", opts.ssh.rawOptions)
 	}
 	if opts.deployment.logLines != 7 {
 		t.Fatalf("logLines = %d, want %d", opts.deployment.logLines, 7)
@@ -103,29 +103,59 @@ func TestResolveInvocationOptionsCLIOverridesRepoConfig(t *testing.T) {
 		t.Fatalf("resolveInvocationOptions returned error: %v", err)
 	}
 
-	if got := opts.args[0]; got != "./bin/worker" {
+	if got := opts.localPath; got != "./bin/worker" {
 		t.Fatalf("local_path = %q, want %q", got, "./bin/worker")
 	}
-	if got := opts.args[1]; got != "prod" {
+	if got := opts.remoteHost; got != "prod" {
 		t.Fatalf("remote_host = %q, want %q", got, "prod")
 	}
 	if opts.remoteService != "worker" {
 		t.Fatalf("remoteService = %q, want %q", opts.remoteService, "worker")
 	}
-	if !opts.sshPortSet || opts.sshPort != 2201 {
-		t.Fatalf("ssh port = (%v, %d), want (true, 2201)", opts.sshPortSet, opts.sshPort)
+	if opts.ssh.port == nil || *opts.ssh.port != 2201 {
+		t.Fatalf("ssh port = %v, want 2201", opts.ssh.port)
 	}
-	if !equalStringSlices([]string(opts.identityFiles), []string{"~/.ssh/id_override", filepath.Join(repoDir, "keys", "from-config")}) {
-		t.Fatalf("identityFiles = %v", []string(opts.identityFiles))
+	if !equalStringSlices(opts.ssh.identityFiles, []string{"~/.ssh/id_override", filepath.Join(repoDir, "keys", "from-config")}) {
+		t.Fatalf("identityFiles = %v", opts.ssh.identityFiles)
 	}
-	if !equalStringSlices([]string(opts.sshOptions), []string{"HostName=10.0.0.10", "HostName=10.0.0.20"}) {
-		t.Fatalf("sshOptions = %v", []string(opts.sshOptions))
+	if !equalStringSlices(opts.ssh.rawOptions, []string{"HostName=10.0.0.10", "HostName=10.0.0.20"}) {
+		t.Fatalf("sshOptions = %v", opts.ssh.rawOptions)
 	}
 	if opts.deployment.logLines != 8 {
 		t.Fatalf("logLines = %d, want %d", opts.deployment.logLines, 8)
 	}
 	if opts.deployment.healthCheckWait != defaultHealthCheckWait {
 		t.Fatalf("healthCheckWait = %v, want %v", opts.deployment.healthCheckWait, defaultHealthCheckWait)
+	}
+}
+
+func TestResolveInvocationOptionsAllowsCLIToReEnableKnownHostsChecks(t *testing.T) {
+	repoDir := newRepoDirForTest(t)
+	configPath := filepath.Join(repoDir, repoConfigFileName)
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"local_path = \"build/api\"",
+		"remote_host = \"prod\"",
+		"",
+		"[ssh]",
+		"ignore_known_hosts = true",
+	}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	parsed, err := parseCLIArgs([]string{"-k=false"})
+	if err != nil {
+		t.Fatalf("parseCLIArgs returned error: %v", err)
+	}
+
+	opts, _, err := resolveInvocationOptions(parsed, repoDir)
+	if err != nil {
+		t.Fatalf("resolveInvocationOptions returned error: %v", err)
+	}
+	if opts.ssh.ignoreKnownHosts {
+		t.Fatal("ignoreKnownHosts = true, want false")
+	}
+	if opts.effectiveConfig.ssh.ignoreKnownHosts == nil || *opts.effectiveConfig.ssh.ignoreKnownHosts {
+		t.Fatal("effective ignoreKnownHosts override = nil/true, want explicit false")
 	}
 }
 
@@ -142,22 +172,28 @@ func TestWriteRepoConfigStoresRepoRelativePathsAndUpdatesGitignore(t *testing.T)
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	opts := cliOptions{
-		sshPort:       2200,
-		sshPortSet:    true,
+	inv := resolvedInvocation{
+		localPath:     filepath.Join(repoDir, "build", "api"),
+		remoteHost:    "prod",
 		remoteService: "api",
-		deployment: deploymentOptions{
-			logLines:           8,
-			logLinesSet:        true,
-			healthCheckWait:    7 * time.Second,
-			healthCheckWaitSet: true,
+		deployment:    deploymentOptions{logLines: 8, healthCheckWait: 7 * time.Second},
+		effectiveConfig: repoConfig{
+			localPath:     filepath.Join(repoDir, "build", "api"),
+			remoteHost:    "prod",
+			remoteService: "api",
+			ssh: sshOverride{
+				port:       intPtr(2200),
+				rawOptions: []string{"User=deploy"},
+			},
+			deployment: deploymentOverride{
+				logLines:        intPtr(8),
+				healthCheckWait: durationPtr(7 * time.Second),
+			},
 		},
-		args:       []string{"../build/api", "prod"},
-		sshOptions: stringSliceFlag{"User=deploy"},
 	}
 
 	configPath := filepath.Join(repoDir, repoConfigFileName)
-	if err := writeRepoConfig(configPath, repoDir, cwd, opts); err != nil {
+	if err := writeRepoConfig(configPath, repoDir, cwd, inv); err != nil {
 		t.Fatalf("writeRepoConfig returned error: %v", err)
 	}
 	if err := ensureRepoGitignoreEntry(repoDir); err != nil {
@@ -206,11 +242,71 @@ func TestWriteRepoConfigStoresRepoRelativePathsAndUpdatesGitignore(t *testing.T)
 	if loaded.localPath != filepath.Join(repoDir, "build", "api") {
 		t.Fatalf("loaded localPath = %q, want %q", loaded.localPath, filepath.Join(repoDir, "build", "api"))
 	}
-	if loaded.deployment.logLines != 8 {
-		t.Fatalf("loaded logLines = %d, want %d", loaded.deployment.logLines, 8)
+	if loaded.deployment.logLines == nil || *loaded.deployment.logLines != 8 {
+		t.Fatalf("loaded logLines = %v, want %d", loaded.deployment.logLines, 8)
 	}
-	if loaded.deployment.healthCheckWait != 7*time.Second {
+	if loaded.deployment.healthCheckWait == nil || *loaded.deployment.healthCheckWait != 7*time.Second {
 		t.Fatalf("loaded healthCheckWait = %v, want %v", loaded.deployment.healthCheckWait, 7*time.Second)
+	}
+}
+
+func TestWriteRepoConfigPersistsExplicitKnownHostsFalse(t *testing.T) {
+	repoDir := newRepoDirForTest(t)
+	configPath := filepath.Join(repoDir, repoConfigFileName)
+	inv := resolvedInvocation{
+		localPath:  filepath.Join(repoDir, "build", "api"),
+		remoteHost: "prod",
+		deployment: defaultDeploymentOptions(),
+		effectiveConfig: repoConfig{
+			localPath:  filepath.Join(repoDir, "build", "api"),
+			remoteHost: "prod",
+			ssh: sshOverride{
+				ignoreKnownHosts: boolPtr(false),
+			},
+		},
+	}
+
+	if err := writeRepoConfig(configPath, repoDir, repoDir, inv); err != nil {
+		t.Fatalf("writeRepoConfig returned error: %v", err)
+	}
+
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	content := string(configData)
+	if !strings.Contains(content, "ignore_known_hosts = false") {
+		t.Fatalf("config missing explicit ignore_known_hosts=false: %s", content)
+	}
+
+	loaded, err := loadRepoConfig(configPath, repoDir)
+	if err != nil {
+		t.Fatalf("loadRepoConfig returned error: %v", err)
+	}
+	if loaded.ssh.ignoreKnownHosts == nil || *loaded.ssh.ignoreKnownHosts {
+		t.Fatal("loaded ignoreKnownHosts = true, want false")
+	}
+}
+
+func TestLoadRepoConfigRejectsInvalidSSHPort(t *testing.T) {
+	repoDir := newRepoDirForTest(t)
+	configPath := filepath.Join(repoDir, repoConfigFileName)
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"local_path = \"build/api\"",
+		"remote_host = \"prod\"",
+		"",
+		"[ssh]",
+		"port = 70000",
+	}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	_, err := loadRepoConfig(configPath, repoDir)
+	if err == nil {
+		t.Fatal("loadRepoConfig returned nil error")
+	}
+	if got := err.Error(); !strings.Contains(got, "port must be between 1 and 65535") {
+		t.Fatalf("loadRepoConfig error = %q", got)
 	}
 }
 

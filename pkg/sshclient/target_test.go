@@ -32,6 +32,13 @@ func TestSSHTargetParseUserHostPort(t *testing.T) {
 			wantPort: 2200,
 		},
 		{
+			name:     "raw ipv6 without port",
+			spec:     "2001:db8::1",
+			wantUser: "",
+			wantHost: "2001:db8::1",
+			wantPort: 0,
+		},
+		{
 			name:     "invalid port keeps host",
 			spec:     "root@example.com:not-a-port",
 			wantUser: "root",
@@ -42,7 +49,10 @@ func TestSSHTargetParseUserHostPort(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotUser, gotHost, gotPort := parseUserHostPort(tt.spec)
+			gotUser, gotHost, gotPort, err := parseUserHostPort(tt.spec)
+			if err != nil {
+				t.Fatalf("parseUserHostPort returned error: %v", err)
+			}
 			if gotUser != tt.wantUser {
 				t.Fatalf("user = %q, want %q", gotUser, tt.wantUser)
 			}
@@ -53,5 +63,15 @@ func TestSSHTargetParseUserHostPort(t *testing.T) {
 				t.Fatalf("port = %d, want %d", gotPort, tt.wantPort)
 			}
 		})
+	}
+}
+
+func TestSSHTargetParseUserHostPortRejectsOutOfRangePort(t *testing.T) {
+	_, _, _, err := parseUserHostPort("example.com:70000")
+	if err == nil {
+		t.Fatal("parseUserHostPort returned nil error")
+	}
+	if got := err.Error(); got != "port must be between 1 and 65535" {
+		t.Fatalf("parseUserHostPort error = %q, want %q", got, "port must be between 1 and 65535")
 	}
 }

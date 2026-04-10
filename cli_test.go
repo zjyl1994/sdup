@@ -121,26 +121,26 @@ func TestCLIParseArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseCLIArgs returned error: %v", err)
 			}
-			if opts.sshPort != tt.wantPort {
-				t.Fatalf("sshPort = %d, want %d", opts.sshPort, tt.wantPort)
+			if got := intPointerOr(opts.ssh.port, 22); got != tt.wantPort {
+				t.Fatalf("sshPort = %d, want %d", got, tt.wantPort)
 			}
-			if opts.sshPortSet != tt.wantPortSet {
-				t.Fatalf("sshPortSet = %v, want %v", opts.sshPortSet, tt.wantPortSet)
+			if got := opts.ssh.port != nil; got != tt.wantPortSet {
+				t.Fatalf("sshPortSet = %v, want %v", got, tt.wantPortSet)
 			}
-			if opts.sshConfigPath != tt.wantConfig {
-				t.Fatalf("sshConfigPath = %q, want %q", opts.sshConfigPath, tt.wantConfig)
+			if got := stringPointerValue(opts.ssh.configPath); got != tt.wantConfig {
+				t.Fatalf("sshConfigPath = %q, want %q", got, tt.wantConfig)
 			}
-			if opts.sshConfigSet != tt.wantConfigSet {
-				t.Fatalf("sshConfigSet = %v, want %v", opts.sshConfigSet, tt.wantConfigSet)
+			if got := opts.ssh.configPath != nil; got != tt.wantConfigSet {
+				t.Fatalf("sshConfigSet = %v, want %v", got, tt.wantConfigSet)
 			}
-			if !equalStringSlices([]string(opts.identityFiles), tt.wantIDs) {
-				t.Fatalf("identityFiles = %v, want %v", []string(opts.identityFiles), tt.wantIDs)
+			if !equalStringSlices(opts.ssh.identityFiles, tt.wantIDs) {
+				t.Fatalf("identityFiles = %v, want %v", opts.ssh.identityFiles, tt.wantIDs)
 			}
-			if !equalStringSlices([]string(opts.sshOptions), tt.wantSSHOpts) {
-				t.Fatalf("sshOptions = %v, want %v", []string(opts.sshOptions), tt.wantSSHOpts)
+			if !equalStringSlices(opts.ssh.rawOptions, tt.wantSSHOpts) {
+				t.Fatalf("sshOptions = %v, want %v", opts.ssh.rawOptions, tt.wantSSHOpts)
 			}
-			if opts.ignoreKnownHosts != tt.wantIgnoreKH {
-				t.Fatalf("ignoreKnownHosts = %v, want %v", opts.ignoreKnownHosts, tt.wantIgnoreKH)
+			if got := boolPointerValue(opts.ssh.ignoreKnownHosts); got != tt.wantIgnoreKH {
+				t.Fatalf("ignoreKnownHosts = %v, want %v", got, tt.wantIgnoreKH)
 			}
 			if opts.remoteService != tt.wantService {
 				t.Fatalf("remoteService = %q, want %q", opts.remoteService, tt.wantService)
@@ -148,19 +148,13 @@ func TestCLIParseArgs(t *testing.T) {
 			if opts.writeConfig != tt.wantWrite {
 				t.Fatalf("writeConfig = %v, want %v", opts.writeConfig, tt.wantWrite)
 			}
-			if tt.wantLocalPath != "" || len(opts.args) > 0 {
-				if len(opts.args) < 1 {
-					t.Fatalf("missing local_path, want %q", tt.wantLocalPath)
-				}
-				if got := opts.args[0]; got != tt.wantLocalPath {
+			if tt.wantLocalPath != "" || opts.localPath != "" {
+				if got := opts.localPath; got != tt.wantLocalPath {
 					t.Fatalf("local_path = %q, want %q", got, tt.wantLocalPath)
 				}
 			}
-			if tt.wantRemote != "" || len(opts.args) > 1 {
-				if len(opts.args) < 2 {
-					t.Fatalf("missing remote_host, want %q", tt.wantRemote)
-				}
-				if got := opts.args[1]; got != tt.wantRemote {
+			if tt.wantRemote != "" || opts.remoteHost != "" {
+				if got := opts.remoteHost; got != tt.wantRemote {
 					t.Fatalf("remote_host = %q, want %q", got, tt.wantRemote)
 				}
 			}
@@ -223,11 +217,11 @@ func TestCLIParseArgsTracksExplicitLogLineOverride(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseCLIArgs returned error: %v", err)
 			}
-			if opts.deployment.logLines != tt.wantLogLines {
-				t.Fatalf("logLines = %d, want %d", opts.deployment.logLines, tt.wantLogLines)
+			if got := intPointerOr(opts.deployment.logLines, defaultDeployLogLines); got != tt.wantLogLines {
+				t.Fatalf("logLines = %d, want %d", got, tt.wantLogLines)
 			}
-			if opts.deployment.logLinesSet != tt.wantLogLinesSet {
-				t.Fatalf("logLinesSet = %v, want %v", opts.deployment.logLinesSet, tt.wantLogLinesSet)
+			if got := opts.deployment.logLines != nil; got != tt.wantLogLinesSet {
+				t.Fatalf("logLinesSet = %v, want %v", got, tt.wantLogLinesSet)
 			}
 		})
 	}
@@ -262,10 +256,63 @@ func TestCLIParseArgsTracksExplicitPortOverride(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseCLIArgs returned error: %v", err)
 			}
-			if opts.sshPortSet != tt.wantSSHPortSet {
-				t.Fatalf("sshPortSet = %v, want %v", opts.sshPortSet, tt.wantSSHPortSet)
+			if got := opts.ssh.port != nil; got != tt.wantSSHPortSet {
+				t.Fatalf("sshPortSet = %v, want %v", got, tt.wantSSHPortSet)
 			}
 		})
+	}
+}
+
+func TestCLIParseArgsTracksExplicitKnownHostsOverride(t *testing.T) {
+	tests := []struct {
+		name                    string
+		args                    []string
+		wantIgnoreKnownHosts    bool
+		wantIgnoreKnownHostsSet bool
+	}{
+		{
+			name:                    "unset",
+			args:                    []string{"./local", "prod"},
+			wantIgnoreKnownHosts:    false,
+			wantIgnoreKnownHostsSet: false,
+		},
+		{
+			name:                    "true",
+			args:                    []string{"-k", "./local", "prod"},
+			wantIgnoreKnownHosts:    true,
+			wantIgnoreKnownHostsSet: true,
+		},
+		{
+			name:                    "explicit false",
+			args:                    []string{"-k=false", "./local", "prod"},
+			wantIgnoreKnownHosts:    false,
+			wantIgnoreKnownHostsSet: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, err := parseCLIArgs(tt.args)
+			if err != nil {
+				t.Fatalf("parseCLIArgs returned error: %v", err)
+			}
+			if got := boolPointerValue(opts.ssh.ignoreKnownHosts); got != tt.wantIgnoreKnownHosts {
+				t.Fatalf("ignoreKnownHosts = %v, want %v", got, tt.wantIgnoreKnownHosts)
+			}
+			if got := opts.ssh.ignoreKnownHosts != nil; got != tt.wantIgnoreKnownHostsSet {
+				t.Fatalf("ignoreKnownHostsSet = %v, want %v", got, tt.wantIgnoreKnownHostsSet)
+			}
+		})
+	}
+}
+
+func TestCLIParseArgsRejectsInvalidExplicitPort(t *testing.T) {
+	_, err := parseCLIArgs([]string{"-p", "70000", "./local", "prod"})
+	if err == nil {
+		t.Fatal("parseCLIArgs returned nil error")
+	}
+	if got := err.Error(); got != "port must be between 1 and 65535" {
+		t.Fatalf("parseCLIArgs error = %q, want %q", got, "port must be between 1 and 65535")
 	}
 }
 
@@ -300,4 +347,25 @@ func equalStringSlices(got []string, want []string) bool {
 		}
 	}
 	return true
+}
+
+func intPointerOr(value *int, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func boolPointerValue(value *bool) bool {
+	if value == nil {
+		return false
+	}
+	return *value
+}
+
+func stringPointerValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/zjyl1994/sdup/pkg/sshclient"
 )
@@ -70,20 +71,20 @@ func deploySystemdUpdate(session sshclient.Session, localFile, remoteService str
 	}
 
 	if err := restartService(session, remoteService); err != nil {
-		return rollbackAfterFailedDeploy(session, remoteService, check, err)
+		return rollbackAfterFailedDeploy(session, remoteService, check, deployOpts.healthCheckWait, err)
 	}
 
 	err = verifyServiceStable(session, remoteService, deployOpts.healthCheckWait)
 	if err != nil {
-		return rollbackAfterFailedDeploy(session, remoteService, check, err)
+		return rollbackAfterFailedDeploy(session, remoteService, check, deployOpts.healthCheckWait, err)
 	}
 
 	fmt.Printf("Service restarted: %s\n", remoteService)
 	return nil
 }
 
-func rollbackAfterFailedDeploy(session sshclient.Session, remoteService string, check *deploymentCheck, deployErr error) error {
-	rollbackPath, rollbackErr := rollbackBinary(session, remoteService, check.backupPath, check.execPath)
+func rollbackAfterFailedDeploy(session sshclient.Session, remoteService string, check *deploymentCheck, waitWindow time.Duration, deployErr error) error {
+	rollbackPath, rollbackErr := rollbackBinary(session, remoteService, check.backupPath, check.execPath, waitWindow)
 	if rollbackErr != nil {
 		return errors.Join(
 			fmt.Errorf("service failed after deploy: %w", deployErr),

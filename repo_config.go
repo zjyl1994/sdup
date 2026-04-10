@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/zjyl1994/sdup/pkg/sshclient"
 )
 
 const repoConfigFileName = ".sdup.toml"
@@ -19,17 +20,11 @@ type repoContext struct {
 }
 
 type repoConfig struct {
-	localPath        string
-	remoteHost       string
-	remoteService    string
-	deployment       deploymentOptions
-	sshPort          int
-	sshPortSet       bool
-	sshConfigPath    string
-	sshConfigSet     bool
-	identityFiles    []string
-	sshOptions       []string
-	ignoreKnownHosts bool
+	localPath     string
+	remoteHost    string
+	remoteService string
+	ssh           sshOverride
+	deployment    deploymentOverride
 }
 
 type repoConfigDocument struct {
@@ -53,26 +48,23 @@ type repoDeployDocument struct {
 	HealthCheckWait *string `toml:"health_check_wait,omitempty"`
 }
 
-func resolveInvocationOptions(cli cliOptions, cwd string) (cliOptions, repoContext, error) {
+func resolveInvocationOptions(cli cliInput, cwd string) (resolvedInvocation, repoContext, error) {
 	repoCtx, err := resolveRepoContext(cwd)
 	if err != nil {
-		return cliOptions{}, repoContext{}, err
+		return resolvedInvocation{}, repoContext{}, err
 	}
 
 	cfg, err := loadRepoConfig(repoCtx.configPath, repoCtx.rootDir)
 	if err != nil {
-		return cliOptions{}, repoCtx, err
+		return resolvedInvocation{}, repoCtx, err
 	}
 
-	opts := mergeCLIOptions(cfg, cli)
-	if opts.remoteService == "" && len(opts.args) > 0 && strings.TrimSpace(opts.args[0]) != "" {
-		opts.remoteService = filepath.Base(opts.args[0])
-	}
-	if err := validateInvocationOptions(opts); err != nil {
-		return cliOptions{}, repoCtx, err
+	inv := resolveInvocation(cfg, cli)
+	if err := validateResolvedInvocation(inv); err != nil {
+		return resolvedInvocation{}, repoCtx, err
 	}
 
-	return opts, repoCtx, nil
+	return inv, repoCtx, nil
 }
 
 func resolveRepoContext(cwd string) (repoContext, error) {
@@ -101,82 +93,6 @@ func findRepoRoot(startDir string) string {
 		}
 		dir = parent
 	}
-}
-
-func validateInvocationOptions(opts cliOptions) error {
-	missing := []string{}
-	if len(opts.args) < 1 || strings.TrimSpace(opts.args[0]) == "" {
-		missing = append(missing, "local_path")
-	}
-	if len(opts.args) < 2 || strings.TrimSpace(opts.args[1]) == "" {
-		missing = append(missing, "remote_host")
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("missing required arguments: %s", strings.Join(missing, ", "))
-	}
-	return nil
-}
-
-func mergeCLIOptions(cfg repoConfig, cli cliOptions) cliOptions {
-	localPath := cfg.localPath
-	remoteHost := cfg.remoteHost
-	if len(cli.args) >= 1 {
-		localPath = cli.args[0]
-	}
-	if len(cli.args) >= 2 {
-		remoteHost = cli.args[1]
-	}
-
-	merged := cliOptions{
-		sshPort:          cfg.sshPort,
-		sshPortSet:       cfg.sshPortSet,
-		sshConfigPath:    cfg.sshConfigPath,
-		sshConfigSet:     cfg.sshConfigSet,
-		identityFiles:    append(stringSliceFlag(nil), cfg.identityFiles...),
-		sshOptions:       append(stringSliceFlag(nil), cfg.sshOptions...),
-		ignoreKnownHosts: cfg.ignoreKnownHosts,
-		remoteService:    cfg.remoteService,
-		deployment:       cfg.deployment,
-		writeConfig:      cli.writeConfig,
-	}
-
-	if localPath != "" || remoteHost != "" {
-		merged.args = append(merged.args, localPath)
-	}
-	if remoteHost != "" {
-		if len(merged.args) == 0 {
-			merged.args = append(merged.args, "")
-		}
-		merged.args = append(merged.args, remoteHost)
-	}
-
-	if cli.remoteService != "" {
-		merged.remoteService = cli.remoteService
-	}
-	if cli.sshConfigSet {
-		merged.sshConfigPath = cli.sshConfigPath
-		merged.sshConfigSet = true
-	}
-	if cli.sshPortSet {
-		merged.sshPort = cli.sshPort
-		merged.sshPortSet = true
-	}
-	if len(cli.identityFiles) > 0 {
-		merged.identityFiles = append(append(stringSliceFlag(nil), cli.identityFiles...), cfg.identityFiles...)
-	}
-	if len(cli.sshOptions) > 0 {
-		merged.sshOptions = append(append(stringSliceFlag(nil), cfg.sshOptions...), cli.sshOptions...)
-	}
-	if cli.ignoreKnownHosts {
-		merged.ignoreKnownHosts = true
-	}
-	if cli.deployment.logLinesSet {
-		merged.deployment.logLines = cli.deployment.logLines
-		merged.deployment.logLinesSet = true
-	}
-
-	merged.deployment = buildDeploymentOptions(merged)
-	return merged
 }
 
 func loadRepoConfig(configPath, baseDir string) (repoConfig, error) {
@@ -224,55 +140,78 @@ func repoConfigFromDocument(doc repoConfigDocument, baseDir string) (repoConfig,
 	cfg.remoteService = doc.RemoteService
 
 	if doc.SSH != nil {
-		if doc.SSH.Config != nil {
-			resolved, err := resolvePathValue(*doc.SSH.Config, baseDir)
-			if err != nil {
-				return repoConfig{}, err
-			}
-			cfg.sshConfigPath = resolved
-			cfg.sshConfigSet = true
+		sshCfg, err := repoSSHOverrideFromDocument(*doc.SSH, baseDir)
+		if err != nil {
+			return repoConfig{}, err
 		}
-		if doc.SSH.Port != nil {
-			cfg.sshPort = *doc.SSH.Port
-			cfg.sshPortSet = true
-		}
-		if doc.SSH.IgnoreKnownHosts != nil {
-			cfg.ignoreKnownHosts = *doc.SSH.IgnoreKnownHosts
-		}
-		if len(doc.SSH.IdentityFiles) > 0 {
-			cfg.identityFiles = make([]string, 0, len(doc.SSH.IdentityFiles))
-			for _, identityFile := range doc.SSH.IdentityFiles {
-				resolved, err := resolvePathValue(identityFile, baseDir)
-				if err != nil {
-					return repoConfig{}, err
-				}
-				cfg.identityFiles = append(cfg.identityFiles, resolved)
-			}
-		}
-		if len(doc.SSH.Options) > 0 {
-			cfg.sshOptions = append([]string(nil), doc.SSH.Options...)
-		}
+		cfg.ssh = sshCfg
 	}
 
 	if doc.Deploy != nil {
-		if doc.Deploy.LogLines != nil {
-			if *doc.Deploy.LogLines < 0 {
-				return repoConfig{}, fmt.Errorf("log_lines must be >= 0")
-			}
-			cfg.deployment.logLines = *doc.Deploy.LogLines
-			cfg.deployment.logLinesSet = true
+		deployCfg, err := repoDeploymentOverrideFromDocument(*doc.Deploy)
+		if err != nil {
+			return repoConfig{}, err
 		}
-		if doc.Deploy.HealthCheckWait != nil {
-			duration, err := time.ParseDuration(*doc.Deploy.HealthCheckWait)
+		cfg.deployment = deployCfg
+	}
+
+	return cfg, nil
+}
+
+func repoSSHOverrideFromDocument(doc repoSSHDocument, baseDir string) (sshOverride, error) {
+	var cfg sshOverride
+
+	if doc.Config != nil {
+		resolved, err := resolvePathValue(*doc.Config, baseDir)
+		if err != nil {
+			return sshOverride{}, err
+		}
+		cfg.configPath = stringPtr(resolved)
+	}
+	if doc.Port != nil {
+		if err := sshclient.ValidatePort(*doc.Port); err != nil {
+			return sshOverride{}, err
+		}
+		cfg.port = intPtr(*doc.Port)
+	}
+	if doc.IgnoreKnownHosts != nil {
+		cfg.ignoreKnownHosts = boolPtr(*doc.IgnoreKnownHosts)
+	}
+	if len(doc.IdentityFiles) > 0 {
+		cfg.identityFiles = make([]string, 0, len(doc.IdentityFiles))
+		for _, identityFile := range doc.IdentityFiles {
+			resolved, err := resolvePathValue(identityFile, baseDir)
 			if err != nil {
-				return repoConfig{}, fmt.Errorf("expected duration string, got %q", *doc.Deploy.HealthCheckWait)
+				return sshOverride{}, err
 			}
-			if duration < 0 {
-				return repoConfig{}, fmt.Errorf("health_check_wait must be >= 0")
-			}
-			cfg.deployment.healthCheckWait = duration
-			cfg.deployment.healthCheckWaitSet = true
+			cfg.identityFiles = append(cfg.identityFiles, resolved)
 		}
+	}
+	if len(doc.Options) > 0 {
+		cfg.rawOptions = cloneStrings(doc.Options)
+	}
+
+	return cfg, nil
+}
+
+func repoDeploymentOverrideFromDocument(doc repoDeployDocument) (deploymentOverride, error) {
+	var cfg deploymentOverride
+
+	if doc.LogLines != nil {
+		if *doc.LogLines < 0 {
+			return deploymentOverride{}, fmt.Errorf("log_lines must be >= 0")
+		}
+		cfg.logLines = intPtr(*doc.LogLines)
+	}
+	if doc.HealthCheckWait != nil {
+		duration, err := time.ParseDuration(*doc.HealthCheckWait)
+		if err != nil {
+			return deploymentOverride{}, fmt.Errorf("expected duration string, got %q", *doc.HealthCheckWait)
+		}
+		if duration < 0 {
+			return deploymentOverride{}, fmt.Errorf("health_check_wait must be >= 0")
+		}
+		cfg.healthCheckWait = durationPtr(duration)
 	}
 
 	return cfg, nil
@@ -292,8 +231,8 @@ func resolvePathValue(value, baseDir string) (string, error) {
 	return filepath.Clean(filepath.Join(baseDir, value)), nil
 }
 
-func writeRepoConfig(configPath, rootDir, cwd string, opts cliOptions) error {
-	cfg, err := repoConfigFromOptions(rootDir, cwd, opts)
+func writeRepoConfig(configPath, rootDir, cwd string, inv resolvedInvocation) error {
+	cfg, err := repoConfigForWrite(rootDir, cwd, inv.effectiveConfig)
 	if err != nil {
 		return err
 	}
@@ -304,54 +243,47 @@ func writeRepoConfig(configPath, rootDir, cwd string, opts cliOptions) error {
 	return os.WriteFile(configPath, data, 0o600)
 }
 
-func repoConfigFromOptions(rootDir, cwd string, opts cliOptions) (repoConfig, error) {
-	localPath := ""
-	remoteHost := ""
-	if len(opts.args) > 0 {
-		var err error
-		localPath, err = pathForRepoConfig(opts.args[0], rootDir, cwd)
+func repoConfigForWrite(rootDir, cwd string, cfg repoConfig) (repoConfig, error) {
+	written := repoConfig{
+		remoteHost:    cfg.remoteHost,
+		remoteService: cfg.remoteService,
+		ssh: sshOverride{
+			port:             cloneIntPointer(cfg.ssh.port),
+			ignoreKnownHosts: cloneBoolPointer(cfg.ssh.ignoreKnownHosts),
+			rawOptions:       cloneStrings(cfg.ssh.rawOptions),
+		},
+		deployment: deploymentOverride{
+			logLines:        cloneIntPointer(cfg.deployment.logLines),
+			healthCheckWait: cloneDurationPointer(cfg.deployment.healthCheckWait),
+		},
+	}
+
+	if cfg.localPath != "" {
+		localPath, err := pathForRepoConfig(cfg.localPath, rootDir, cwd)
 		if err != nil {
 			return repoConfig{}, err
 		}
+		written.localPath = localPath
 	}
-	if len(opts.args) > 1 {
-		remoteHost = opts.args[1]
-	}
-
-	cfg := repoConfig{
-		localPath:        localPath,
-		remoteHost:       remoteHost,
-		remoteService:    opts.remoteService,
-		deployment:       opts.deployment,
-		sshPort:          opts.sshPort,
-		sshPortSet:       opts.sshPortSet,
-		ignoreKnownHosts: opts.ignoreKnownHosts,
-	}
-
-	if opts.sshConfigSet {
-		cfg.sshConfigSet = true
-		cfgPath, err := pathForRepoConfig(opts.sshConfigPath, rootDir, cwd)
+	if cfg.ssh.configPath != nil {
+		configPath, err := pathForRepoConfig(*cfg.ssh.configPath, rootDir, cwd)
 		if err != nil {
 			return repoConfig{}, err
 		}
-		cfg.sshConfigPath = cfgPath
+		written.ssh.configPath = stringPtr(configPath)
 	}
-
-	if len(opts.identityFiles) > 0 {
-		cfg.identityFiles = make([]string, 0, len(opts.identityFiles))
-		for _, identityFile := range opts.identityFiles {
+	if len(cfg.ssh.identityFiles) > 0 {
+		written.ssh.identityFiles = make([]string, 0, len(cfg.ssh.identityFiles))
+		for _, identityFile := range cfg.ssh.identityFiles {
 			configPath, err := pathForRepoConfig(identityFile, rootDir, cwd)
 			if err != nil {
 				return repoConfig{}, err
 			}
-			cfg.identityFiles = append(cfg.identityFiles, configPath)
+			written.ssh.identityFiles = append(written.ssh.identityFiles, configPath)
 		}
 	}
-	if len(opts.sshOptions) > 0 {
-		cfg.sshOptions = append([]string(nil), opts.sshOptions...)
-	}
 
-	return cfg, nil
+	return written, nil
 }
 
 func pathForRepoConfig(value, rootDir, cwd string) (string, error) {
@@ -375,10 +307,10 @@ func encodeRepoConfig(cfg repoConfig) ([]byte, error) {
 		RemoteService: cfg.remoteService,
 	}
 
-	if sshDoc := buildRepoSSHDocument(cfg); sshDoc != nil {
+	if sshDoc := buildRepoSSHDocument(cfg.ssh); sshDoc != nil {
 		doc.SSH = sshDoc
 	}
-	if deployDoc := buildRepoDeployDocument(cfg); deployDoc != nil {
+	if deployDoc := buildRepoDeployDocument(cfg.deployment); deployDoc != nil {
 		doc.Deploy = deployDoc
 	}
 
@@ -389,31 +321,31 @@ func encodeRepoConfig(cfg repoConfig) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func buildRepoSSHDocument(cfg repoConfig) *repoSSHDocument {
+func buildRepoSSHDocument(cfg sshOverride) *repoSSHDocument {
 	doc := &repoSSHDocument{}
 	hasValues := false
 
-	if cfg.sshConfigSet {
-		value := cfg.sshConfigPath
+	if cfg.configPath != nil {
+		value := *cfg.configPath
 		doc.Config = &value
 		hasValues = true
 	}
-	if cfg.sshPortSet {
-		value := cfg.sshPort
+	if cfg.port != nil {
+		value := *cfg.port
 		doc.Port = &value
 		hasValues = true
 	}
-	if cfg.ignoreKnownHosts {
-		value := true
+	if cfg.ignoreKnownHosts != nil {
+		value := *cfg.ignoreKnownHosts
 		doc.IgnoreKnownHosts = &value
 		hasValues = true
 	}
 	if len(cfg.identityFiles) > 0 {
-		doc.IdentityFiles = append([]string(nil), cfg.identityFiles...)
+		doc.IdentityFiles = cloneStrings(cfg.identityFiles)
 		hasValues = true
 	}
-	if len(cfg.sshOptions) > 0 {
-		doc.Options = append([]string(nil), cfg.sshOptions...)
+	if len(cfg.rawOptions) > 0 {
+		doc.Options = cloneStrings(cfg.rawOptions)
 		hasValues = true
 	}
 
@@ -423,17 +355,17 @@ func buildRepoSSHDocument(cfg repoConfig) *repoSSHDocument {
 	return doc
 }
 
-func buildRepoDeployDocument(cfg repoConfig) *repoDeployDocument {
+func buildRepoDeployDocument(cfg deploymentOverride) *repoDeployDocument {
 	doc := &repoDeployDocument{}
 	hasValues := false
 
-	if cfg.deployment.logLinesSet {
-		value := cfg.deployment.logLines
+	if cfg.logLines != nil {
+		value := *cfg.logLines
 		doc.LogLines = &value
 		hasValues = true
 	}
-	if cfg.deployment.healthCheckWaitSet {
-		value := cfg.deployment.healthCheckWait.String()
+	if cfg.healthCheckWait != nil {
+		value := cfg.healthCheckWait.String()
 		doc.HealthCheckWait = &value
 		hasValues = true
 	}
@@ -442,6 +374,27 @@ func buildRepoDeployDocument(cfg repoConfig) *repoDeployDocument {
 		return nil
 	}
 	return doc
+}
+
+func cloneIntPointer(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	return intPtr(*value)
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	return boolPtr(*value)
+}
+
+func cloneDurationPointer(value *time.Duration) *time.Duration {
+	if value == nil {
+		return nil
+	}
+	return durationPtr(*value)
 }
 
 func ensureRepoGitignoreEntry(rootDir string) error {

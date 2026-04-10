@@ -7,10 +7,8 @@ const defaultHealthCheckWait = 5 * time.Second
 const healthCheckPollInterval = time.Second
 
 type deploymentOptions struct {
-	logLines           int
-	logLinesSet        bool
-	healthCheckWait    time.Duration
-	healthCheckWaitSet bool
+	logLines        int
+	healthCheckWait time.Duration
 }
 
 func defaultDeploymentOptions() deploymentOptions {
@@ -18,17 +16,4 @@ func defaultDeploymentOptions() deploymentOptions {
 		logLines:        defaultDeployLogLines,
 		healthCheckWait: defaultHealthCheckWait,
 	}
-}
-
-func buildDeploymentOptions(opts cliOptions) deploymentOptions {
-	resolved := defaultDeploymentOptions()
-	if opts.deployment.logLinesSet {
-		resolved.logLines = opts.deployment.logLines
-		resolved.logLinesSet = true
-	}
-	if opts.deployment.healthCheckWaitSet {
-		resolved.healthCheckWait = opts.deployment.healthCheckWait
-		resolved.healthCheckWaitSet = true
-	}
-	return resolved
 }

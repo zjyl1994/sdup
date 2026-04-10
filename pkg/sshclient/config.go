@@ -37,7 +37,10 @@ type sshConfigReader interface {
 }
 
 func resolveConnectionConfig(remote string, options Options) (*hostConfig, error) {
-	userOverride, hostAlias, portOverride := parseUserHostPort(remote)
+	userOverride, hostAlias, portOverride, err := parseUserHostPort(remote)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg, err := resolveSSHConfig(hostAlias, options.ConfigPath)
 	if err != nil {
@@ -46,6 +49,11 @@ func resolveConnectionConfig(remote string, options Options) (*hostConfig, error
 
 	if err := applyConnectionOverrides(cfg, userOverride, portOverride, options); err != nil {
 		return nil, err
+	}
+	if cfg.Port != 0 {
+		if err := ValidatePort(cfg.Port); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.Port == 0 {
 		cfg.Port = defaultPort
@@ -223,6 +231,9 @@ func applyRawOptions(cfg *hostConfig, rawOptions []string) error {
 		case "port":
 			port, err := parseInt(value)
 			if err != nil {
+				return fmt.Errorf("invalid -o Port value %q: %w", value, err)
+			}
+			if err := ValidatePort(port); err != nil {
 				return fmt.Errorf("invalid -o Port value %q: %w", value, err)
 			}
 			cfg.Port = port

@@ -188,6 +188,30 @@ func TestApplyConnectionOverridesAppliesRawOptionOverride(t *testing.T) {
 	}
 }
 
+func TestResolveConnectionConfigRejectsOutOfRangeRemotePort(t *testing.T) {
+	_, err := resolveConnectionConfig("prod:70000", Options{})
+	if err == nil {
+		t.Fatal("resolveConnectionConfig returned nil error")
+	}
+	if got := err.Error(); got != "port must be between 1 and 65535" {
+		t.Fatalf("resolveConnectionConfig error = %q, want %q", got, "port must be between 1 and 65535")
+	}
+}
+
+func TestApplyConnectionOverridesRejectsOutOfRangeRawOptionPort(t *testing.T) {
+	cfg := &hostConfig{User: "ubuntu", Port: 1000, Hostname: "prod"}
+
+	err := applyConnectionOverrides(cfg, "", 0, Options{
+		RawOptions: []string{"Port=70000"},
+	})
+	if err == nil {
+		t.Fatal("applyConnectionOverrides returned nil error")
+	}
+	if got := err.Error(); got != "invalid -o Port value \"70000\": port must be between 1 and 65535" {
+		t.Fatalf("applyConnectionOverrides error = %q", got)
+	}
+}
+
 func writeSSHConfigForTest(t *testing.T, content string) string {
 	t.Helper()
 

@@ -13,18 +13,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	opts, err := parseCLIArgs(os.Args[1:])
+	cli, err := parseCLIArgs(os.Args[1:])
 	if err != nil {
 		exitWithCLIError(err)
 	}
 
-	opts, repoCtx, err := resolveInvocationOptions(opts, cwd)
+	inv, repoCtx, err := resolveInvocationOptions(cli, cwd)
 	if err != nil {
 		exitWithCLIError(err)
 	}
 
-	if opts.writeConfig {
-		if err := writeRepoConfig(repoCtx.configPath, repoCtx.rootDir, cwd, opts); err != nil {
+	if inv.writeConfig {
+		if err := writeRepoConfig(repoCtx.configPath, repoCtx.rootDir, cwd, inv); err != nil {
 			os.Stderr.WriteString(err.Error() + "\n")
 			os.Exit(1)
 		}
@@ -36,7 +36,7 @@ func main() {
 		return
 	}
 
-	if err := SystemdUpdate(opts.args[0], opts.remoteService, opts.args[1], buildSSHCLIOptions(opts), buildDeploymentOptions(opts)); err != nil {
+	if err := SystemdUpdate(inv.localPath, inv.remoteService, inv.remoteHost, buildSSHOptions(inv), inv.deployment); err != nil {
 		os.Stderr.WriteString(err.Error() + "\n")
 		os.Exit(1)
 	}

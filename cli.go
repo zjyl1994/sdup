@@ -6,60 +6,80 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/zjyl1994/sdup/pkg/sshclient"
 )
 
-const usageText = "Usage: sdup [flags] [local_path] [remote_host]\nLoads repo-local .sdup.toml from the git root when present. Use -w/-W to write the current effective arguments into that file and exit.\nFlags are case-insensitive and may appear before or after positional args: -p/-P <port>, -s <service>, -i <identity>, -o <key=value>, -f/-F <config>, -n/-N <log_lines>, -k/-K (ignore known_hosts), -w/-W (write repo config)\n"
+const usageText = "Usage: sdup [flags] [local_path] [remote_host]\nLoads repo-local .sdup.toml from the git root when present. Use -w/-W to write the current effective arguments into that file and exit.\nFlags are case-insensitive and may appear before or after positional args: -p/-P <port>, -s <service>, -i <identity>, -o <key=value>, -f/-F <config>, -n/-N <log_lines>, -k/-K[=true|false] (ignore known_hosts), -w/-W (write repo config)\n"
 
-type cliOptions struct {
-	sshPort          int
-	sshPortSet       bool
-	sshConfigPath    string
-	sshConfigSet     bool
-	identityFiles    stringSliceFlag
-	sshOptions       stringSliceFlag
-	ignoreKnownHosts bool
-	remoteService    string
-	deployment       deploymentOptions
-	writeConfig      bool
-	args             []string
-}
-
-func parseCLIArgs(args []string) (cliOptions, error) {
-	var opts cliOptions
+func parseCLIArgs(args []string) (cliInput, error) {
+	var (
+		sshPort          = 22
+		sshConfigPath    string
+		identityFiles    stringSliceFlag
+		sshOptions       stringSliceFlag
+		ignoreKnownHosts bool
+		remoteService    string
+		logLines         = defaultDeployLogLines
+		writeConfig      bool
+	)
 
 	fs := flag.NewFlagSet("sdup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.IntVar(&opts.sshPort, "p", 22, "SSH port")
-	fs.StringVar(&opts.sshConfigPath, "f", "", "SSH config file")
-	fs.Var(&opts.identityFiles, "i", "SSH identity file")
-	fs.Var(&opts.sshOptions, "o", "SSH option in key=value form")
-	fs.BoolVar(&opts.ignoreKnownHosts, "k", false, "Ignore SSH known_hosts host key verification")
-	fs.StringVar(&opts.remoteService, "s", "", "Remote service")
-	fs.IntVar(&opts.deployment.logLines, "n", defaultDeployLogLines, "Recent journal lines to print after deploy (0 disables)")
-	fs.BoolVar(&opts.writeConfig, "w", false, "Write repo-local .sdup.toml from current arguments and exit")
+	fs.IntVar(&sshPort, "p", 22, "SSH port")
+	fs.StringVar(&sshConfigPath, "f", "", "SSH config file")
+	fs.Var(&identityFiles, "i", "SSH identity file")
+	fs.Var(&sshOptions, "o", "SSH option in key=value form")
+	fs.BoolVar(&ignoreKnownHosts, "k", false, "Ignore SSH known_hosts host key verification")
+	fs.StringVar(&remoteService, "s", "", "Remote service")
+	fs.IntVar(&logLines, "n", defaultDeployLogLines, "Recent journal lines to print after deploy (0 disables)")
+	fs.BoolVar(&writeConfig, "w", false, "Write repo-local .sdup.toml from current arguments and exit")
 
 	if err := fs.Parse(reorderCLIArgs(fs, args)); err != nil {
-		return cliOptions{}, err
+		return cliInput{}, err
 	}
+
+	parsed := cliInput{
+		remoteService: remoteService,
+		writeConfig:   writeConfig,
+		ssh: sshOverride{
+			identityFiles: cloneStrings(identityFiles),
+			rawOptions:    cloneStrings(sshOptions),
+		},
+	}
+
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "p":
-			opts.sshPortSet = true
+			parsed.ssh.port = intPtr(sshPort)
 		case "f":
-			opts.sshConfigSet = true
+			parsed.ssh.configPath = stringPtr(sshConfigPath)
+		case "k":
+			parsed.ssh.ignoreKnownHosts = boolPtr(ignoreKnownHosts)
 		case "n":
-			opts.deployment.logLinesSet = true
+			parsed.deployment.logLines = intPtr(logLines)
 		}
 	})
-	if opts.deployment.logLines < 0 {
-		return cliOptions{}, fmt.Errorf("log_lines must be >= 0")
+	if parsed.ssh.port != nil {
+		if err := sshclient.ValidatePort(*parsed.ssh.port); err != nil {
+			return cliInput{}, err
+		}
+	}
+	if parsed.deployment.logLines != nil && *parsed.deployment.logLines < 0 {
+		return cliInput{}, fmt.Errorf("log_lines must be >= 0")
 	}
 	if fs.NArg() > 2 {
-		return cliOptions{}, fmt.Errorf("expected at most 2 positional arguments, got %d", fs.NArg())
+		return cliInput{}, fmt.Errorf("expected at most 2 positional arguments, got %d", fs.NArg())
 	}
 
-	opts.args = fs.Args()
-	return opts, nil
+	if fs.NArg() >= 1 {
+		parsed.localPath = fs.Arg(0)
+	}
+	if fs.NArg() >= 2 {
+		parsed.remoteHost = fs.Arg(1)
+	}
+
+	return parsed, nil
 }
 
 func reorderCLIArgs(fs *flag.FlagSet, args []string) []string {

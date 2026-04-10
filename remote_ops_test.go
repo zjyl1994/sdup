@@ -249,6 +249,10 @@ func TestDeploySystemdUpdateRollsBackToPreviousBackupWhenServiceFailsHealthCheck
 	session := &fakeRemoteSession{
 		commandResults: baseDeployCommandResults(localFile, "api", execPath),
 	}
+	session.commandResults[createInstallTempFileCommand(execPath)] = []commandResult{
+		{output: []byte(installTempPathForTest(execPath) + "\n")},
+		{output: []byte(installTempPathForTest(execPath) + "\n")},
+	}
 	session.commandResults[verifyServiceActiveCommand("api")] = []commandResult{{output: []byte("active\n")}, {err: errors.New("inactive")}, {output: []byte("active\n")}}
 
 	totalSize, err := localFileSize(localFile)
@@ -261,9 +265,8 @@ func TestDeploySystemdUpdateRollsBackToPreviousBackupWhenServiceFailsHealthCheck
 	defer func() { healthCheckSleepFn = origSleep }()
 
 	err = deploySystemdUpdate(session, localFile, "api", totalSize, deploymentOptions{
-		logLines:           defaultDeployLogLines,
-		healthCheckWait:    1500 * time.Millisecond,
-		healthCheckWaitSet: true,
+		logLines:        defaultDeployLogLines,
+		healthCheckWait: 1500 * time.Millisecond,
 	})
 	if err == nil {
 		t.Fatal("deploySystemdUpdate returned nil error")
@@ -271,14 +274,14 @@ func TestDeploySystemdUpdateRollsBackToPreviousBackupWhenServiceFailsHealthCheck
 	if !strings.Contains(err.Error(), "restored backup "+backupPath) {
 		t.Fatalf("deploySystemdUpdate error = %v, want rollback notice", err)
 	}
-	if count := countCommand(session.runCommands, installBinaryCommand(backupPath, execPath)); count != 1 {
-		t.Fatalf("rollback install command count = %d, want %d; commands = %v", count, 1, session.runCommands)
+	if !containsAllCommands(session.runCommands, installBinaryCommands(backupPath, execPath)) {
+		t.Fatalf("rollback install commands missing; commands = %v", session.runCommands)
 	}
 	if count := countCommand(session.runCommands, restartServiceCommand("api")); count != 2 {
 		t.Fatalf("restart command count = %d, want %d; commands = %v", count, 2, session.runCommands)
 	}
-	if count := countCommand(session.runCommands, installBinaryCommand(stagingPath, execPath)); count != 1 {
-		t.Fatalf("deploy install command count = %d, want %d; commands = %v", count, 1, session.runCommands)
+	if !containsAllCommands(session.runCommands, installBinaryCommands(stagingPath, execPath)) {
+		t.Fatalf("deploy install commands missing; commands = %v", session.runCommands)
 	}
 	if count := countCommand(session.runCommands, fetchRecentLogsCommand("api", defaultDeployLogLines)); count != 1 {
 		t.Fatalf("recent logs command count = %d, want %d; commands = %v", count, 1, session.runCommands)
@@ -309,9 +312,8 @@ func TestDeploySystemdUpdateWaitsForServiceToBecomeActive(t *testing.T) {
 	defer func() { healthCheckSleepFn = origSleep }()
 
 	err = deploySystemdUpdate(session, localFile, "api", totalSize, deploymentOptions{
-		logLines:           defaultDeployLogLines,
-		healthCheckWait:    1500 * time.Millisecond,
-		healthCheckWaitSet: true,
+		logLines:        defaultDeployLogLines,
+		healthCheckWait: 1500 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("deploySystemdUpdate returned error: %v", err)
@@ -319,8 +321,8 @@ func TestDeploySystemdUpdateWaitsForServiceToBecomeActive(t *testing.T) {
 	if count := countCommand(session.runCommands, restartServiceCommand("api")); count != 1 {
 		t.Fatalf("restart command count = %d, want %d; commands = %v", count, 1, session.runCommands)
 	}
-	if count := countCommand(session.runCommands, installBinaryCommand(backupPath, execPath)); count != 0 {
-		t.Fatalf("rollback install command count = %d, want %d; commands = %v", count, 0, session.runCommands)
+	if containsAllCommands(session.runCommands, installBinaryCommands(backupPath, execPath)) {
+		t.Fatalf("rollback install commands should be absent; commands = %v", session.runCommands)
 	}
 	if count := countCommand(session.runCommands, verifyServiceActiveCommand("api")); count != 3 {
 		t.Fatalf("verify command count = %d, want %d; commands = %v", count, 3, session.runCommands)
@@ -410,6 +412,54 @@ func TestVerifyServiceStableWaitsForServiceToBecomeActive(t *testing.T) {
 	}
 }
 
+func TestRollbackBinaryUsesStabilityWindow(t *testing.T) {
+	session := &fakeRemoteSession{
+		commandResults: map[string][]commandResult{
+			createInstallTempFileCommand("/usr/local/bin/api"):                                        {{output: []byte(installTempPathForTest("/usr/local/bin/api") + "\n")}},
+			copyBinaryCommand("/tmp/api.previous", installTempPathForTest("/usr/local/bin/api")):      {{}},
+			copyFileModeCommand("/usr/local/bin/api", installTempPathForTest("/usr/local/bin/api")):   {{}},
+			copyFileOwnerCommand("/usr/local/bin/api", installTempPathForTest("/usr/local/bin/api")):  {{}},
+			moveRemoteFileCommand(installTempPathForTest("/usr/local/bin/api"), "/usr/local/bin/api"): {{}},
+			restartServiceCommand("api"): {{}},
+			verifyServiceActiveCommand("api"): {
+				{output: []byte("active\n")},
+				{output: []byte("active\n")},
+				{output: []byte("failed\n"), err: errors.New("failed")},
+			},
+		},
+	}
+
+	origSleep := healthCheckSleepFn
+	healthCheckSleepFn = func(time.Duration) {}
+	defer func() { healthCheckSleepFn = origSleep }()
+
+	_, err := rollbackBinary(session, "api", "/tmp/api.previous", "/usr/local/bin/api", 1500*time.Millisecond)
+	if err == nil {
+		t.Fatal("rollbackBinary returned nil error")
+	}
+	if !containsAllCommands(session.runCommands, installBinaryCommands("/tmp/api.previous", "/usr/local/bin/api")) {
+		t.Fatalf("rollback install commands missing; commands = %v", session.runCommands)
+	}
+	if count := countCommand(session.runCommands, verifyServiceActiveCommand("api")); count != 3 {
+		t.Fatalf("verify command count = %d, want %d; commands = %v", count, 3, session.runCommands)
+	}
+}
+
+func TestInstallBinaryUsesExplicitReadableSteps(t *testing.T) {
+	tempPath := installTempPathForTest("/usr/local/bin/api")
+	commands := installBinaryCommands("/tmp/uploaded-api", "/usr/local/bin/api")
+	want := []string{
+		createInstallTempFileCommand("/usr/local/bin/api"),
+		copyBinaryCommand("/tmp/uploaded-api", tempPath),
+		copyFileModeCommand("/usr/local/bin/api", tempPath),
+		copyFileOwnerCommand("/usr/local/bin/api", tempPath),
+		moveRemoteFileCommand(tempPath, "/usr/local/bin/api"),
+	}
+	if !equalStringSlices(commands, want) {
+		t.Fatalf("installBinaryCommands = %v, want %v", commands, want)
+	}
+}
+
 func TestUploadProgressRendererSkipsZeroRateDoneRedraw(t *testing.T) {
 	var out bytes.Buffer
 	renderer := &uploadProgressRenderer{
@@ -491,18 +541,22 @@ func filepathForTempFile(t *testing.T) string {
 func baseDeployCommandResults(localFile, service, execPath string) map[string][]commandResult {
 	stagingPath := filepath.Join("/tmp/sdup.testdir", filepath.Base(localFile))
 	backupPath := backupPathForUploadedBinary(stagingPath, execPath)
-	return map[string][]commandResult{
+	results := map[string][]commandResult{
 		fetchExecStartCommand(service):                         {{output: []byte("ExecStart=" + execPath + " --serve\n")}},
 		fetchRecentLogsCommand(service, defaultDeployLogLines): {{output: []byte("recent log\n")}},
 		ensureSudoCommand():                                    {{}},
 		checkRemoteExecutableCommand(execPath):                 {{}},
 		"mktemp -d -t sdup.XXXXXX":                             {{output: []byte("/tmp/sdup.testdir\n")}},
 		copyBinaryCommand(execPath, backupPath):                {{}},
-		installBinaryCommand(stagingPath, execPath):            {{}},
 		restartServiceCommand(service):                         {{}},
 		verifyServiceActiveCommand(service):                    {{output: []byte("active\n")}},
 		removeRemoteFileCommand(backupPath):                    {{}},
 	}
+	results[createInstallTempFileCommand(execPath)] = []commandResult{{output: []byte(installTempPathForTest(execPath) + "\n")}}
+	for _, cmd := range installBinaryCommands(stagingPath, execPath)[1:] {
+		results[cmd] = []commandResult{{}}
+	}
+	return results
 }
 
 func deploymentTestOptions() deploymentOptions {
@@ -520,4 +574,28 @@ func countCommand(commands []string, target string) int {
 		}
 	}
 	return count
+}
+
+func installBinaryCommands(srcPath, dstPath string) []string {
+	tempPath := installTempPathForTest(dstPath)
+	return []string{
+		createInstallTempFileCommand(dstPath),
+		copyBinaryCommand(srcPath, tempPath),
+		copyFileModeCommand(dstPath, tempPath),
+		copyFileOwnerCommand(dstPath, tempPath),
+		moveRemoteFileCommand(tempPath, dstPath),
+	}
+}
+
+func installTempPathForTest(dstPath string) string {
+	return filepath.Join(filepath.Dir(dstPath), "."+filepath.Base(dstPath)+".sdup.test")
+}
+
+func containsAllCommands(commands []string, expected []string) bool {
+	for _, cmd := range expected {
+		if countCommand(commands, cmd) == 0 {
+			return false
+		}
+	}
+	return true
 }
