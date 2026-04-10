@@ -52,7 +52,6 @@ type repoDeployDocument struct {
 	BackupDir       *string `toml:"backup_dir,omitempty"`
 	LogLines        *int    `toml:"log_lines,omitempty"`
 	HealthCheckWait *string `toml:"health_check_wait,omitempty"`
-	LockTimeout     *string `toml:"lock_timeout,omitempty"`
 }
 
 func resolveInvocationOptions(cli cliOptions, cwd string) (cliOptions, repoContext, error) {
@@ -172,6 +171,10 @@ func mergeCLIOptions(cfg repoConfig, cli cliOptions) cliOptions {
 	if cli.ignoreKnownHosts {
 		merged.ignoreKnownHosts = true
 	}
+	if cli.deployment.logLinesSet {
+		merged.deployment.logLines = cli.deployment.logLines
+		merged.deployment.logLinesSet = true
+	}
 
 	merged.deployment = buildDeploymentOptions(merged)
 	return merged
@@ -277,17 +280,6 @@ func repoConfigFromDocument(doc repoConfigDocument, baseDir string) (repoConfig,
 			}
 			cfg.deployment.healthCheckWait = duration
 			cfg.deployment.healthCheckWaitSet = true
-		}
-		if doc.Deploy.LockTimeout != nil {
-			duration, err := time.ParseDuration(*doc.Deploy.LockTimeout)
-			if err != nil {
-				return repoConfig{}, fmt.Errorf("expected duration string, got %q", *doc.Deploy.LockTimeout)
-			}
-			if duration < 0 {
-				return repoConfig{}, fmt.Errorf("lock_timeout must be >= 0")
-			}
-			cfg.deployment.lockTimeout = duration
-			cfg.deployment.lockTimeoutSet = true
 		}
 	}
 
@@ -456,11 +448,6 @@ func buildRepoDeployDocument(cfg repoConfig) *repoDeployDocument {
 	if cfg.deployment.healthCheckWaitSet {
 		value := cfg.deployment.healthCheckWait.String()
 		doc.HealthCheckWait = &value
-		hasValues = true
-	}
-	if cfg.deployment.lockTimeoutSet {
-		value := cfg.deployment.lockTimeout.String()
-		doc.LockTimeout = &value
 		hasValues = true
 	}
 

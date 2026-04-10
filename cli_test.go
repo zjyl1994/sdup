@@ -97,7 +97,7 @@ func TestCLIParseArgs(t *testing.T) {
 		},
 		{
 			name:          "interleaved positional args and case insensitive flags",
-			args:          []string{"./local", "-P2206", "prod", "-Sworker", "-F", "ssh_config"},
+			args:          []string{"./local", "-P2206", "prod", "-Sworker", "-F", "ssh_config", "-N7"},
 			wantPort:      2206,
 			wantPortSet:   true,
 			wantConfig:    "ssh_config",
@@ -205,6 +205,34 @@ func TestCLIParseArgsHelp(t *testing.T) {
 	}
 }
 
+func TestCLIParseArgsTracksExplicitLogLineOverride(t *testing.T) {
+	tests := []struct {
+		name            string
+		args            []string
+		wantLogLines    int
+		wantLogLinesSet bool
+	}{
+		{name: "unset", args: []string{"./local", "prod"}, wantLogLines: defaultDeployLogLines, wantLogLinesSet: false},
+		{name: "space syntax", args: []string{"-n", "7", "./local", "prod"}, wantLogLines: 7, wantLogLinesSet: true},
+		{name: "attached syntax", args: []string{"-N9", "./local", "prod"}, wantLogLines: 9, wantLogLinesSet: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, err := parseCLIArgs(tt.args)
+			if err != nil {
+				t.Fatalf("parseCLIArgs returned error: %v", err)
+			}
+			if opts.deployment.logLines != tt.wantLogLines {
+				t.Fatalf("logLines = %d, want %d", opts.deployment.logLines, tt.wantLogLines)
+			}
+			if opts.deployment.logLinesSet != tt.wantLogLinesSet {
+				t.Fatalf("logLinesSet = %v, want %v", opts.deployment.logLinesSet, tt.wantLogLinesSet)
+			}
+		})
+	}
+}
+
 func TestCLIParseArgsTracksExplicitPortOverride(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -249,6 +277,7 @@ func newCLIFlagSetForTest() *flag.FlagSet {
 	var sshOptions stringSliceFlag
 	var ignoreKnownHosts bool
 	var service string
+	var logLines int
 	var writeConfig bool
 	fs.IntVar(&port, "p", 22, "SSH port")
 	fs.StringVar(&config, "f", "", "SSH config file")
@@ -256,6 +285,7 @@ func newCLIFlagSetForTest() *flag.FlagSet {
 	fs.Var(&sshOptions, "o", "SSH option in key=value form")
 	fs.BoolVar(&ignoreKnownHosts, "k", false, "Ignore SSH known_hosts host key verification")
 	fs.StringVar(&service, "s", "", "Remote service")
+	fs.IntVar(&logLines, "n", defaultDeployLogLines, "Recent journal lines to print after deploy (0 disables)")
 	fs.BoolVar(&writeConfig, "w", false, "Write repo-local .sdup.toml from current arguments and exit")
 	return fs
 }

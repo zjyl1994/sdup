@@ -24,9 +24,8 @@ func TestResolveInvocationOptionsUsesRepoConfig(t *testing.T) {
 		"",
 		"[deploy]",
 		"backup_dir = \"/var/tmp/custom-sdup\"",
-		"log_lines = 42",
+		"log_lines = 7",
 		"health_check_wait = \"9s\"",
-		"lock_timeout = \"13m\"",
 	}, "\n")+"\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
@@ -71,14 +70,11 @@ func TestResolveInvocationOptionsUsesRepoConfig(t *testing.T) {
 	if opts.deployment.backupDir != "/var/tmp/custom-sdup" {
 		t.Fatalf("backupDir = %q, want %q", opts.deployment.backupDir, "/var/tmp/custom-sdup")
 	}
-	if opts.deployment.logLines != 42 {
-		t.Fatalf("logLines = %d, want %d", opts.deployment.logLines, 42)
+	if opts.deployment.logLines != 7 {
+		t.Fatalf("logLines = %d, want %d", opts.deployment.logLines, 7)
 	}
 	if opts.deployment.healthCheckWait != 9*time.Second {
 		t.Fatalf("healthCheckWait = %v, want %v", opts.deployment.healthCheckWait, 9*time.Second)
-	}
-	if opts.deployment.lockTimeout != 13*time.Minute {
-		t.Fatalf("lockTimeout = %v, want %v", opts.deployment.lockTimeout, 13*time.Minute)
 	}
 }
 
@@ -90,6 +86,9 @@ func TestResolveInvocationOptionsCLIOverridesRepoConfig(t *testing.T) {
 		"remote_host = \"prod\"",
 		"remote_service = \"api\"",
 		"",
+		"[deploy]",
+		"log_lines = 3",
+		"",
 		"[ssh]",
 		"port = 2200",
 		"identity_files = [\"keys/from-config\"]",
@@ -98,7 +97,7 @@ func TestResolveInvocationOptionsCLIOverridesRepoConfig(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	parsed, err := parseCLIArgs([]string{"-p", "2201", "-i", "~/.ssh/id_override", "-o", "HostName=10.0.0.20", "-s", "worker", "./bin/worker"})
+	parsed, err := parseCLIArgs([]string{"-p", "2201", "-n", "8", "-i", "~/.ssh/id_override", "-o", "HostName=10.0.0.20", "-s", "worker", "./bin/worker"})
 	if err != nil {
 		t.Fatalf("parseCLIArgs returned error: %v", err)
 	}
@@ -129,14 +128,11 @@ func TestResolveInvocationOptionsCLIOverridesRepoConfig(t *testing.T) {
 	if opts.deployment.backupDir != defaultDeployBackupDir {
 		t.Fatalf("backupDir = %q, want %q", opts.deployment.backupDir, defaultDeployBackupDir)
 	}
-	if opts.deployment.logLines != defaultDeployLogLines {
-		t.Fatalf("logLines = %d, want %d", opts.deployment.logLines, defaultDeployLogLines)
+	if opts.deployment.logLines != 8 {
+		t.Fatalf("logLines = %d, want %d", opts.deployment.logLines, 8)
 	}
 	if opts.deployment.healthCheckWait != defaultHealthCheckWait {
 		t.Fatalf("healthCheckWait = %v, want %v", opts.deployment.healthCheckWait, defaultHealthCheckWait)
-	}
-	if opts.deployment.lockTimeout != defaultDeployLockTimeout {
-		t.Fatalf("lockTimeout = %v, want %v", opts.deployment.lockTimeout, defaultDeployLockTimeout)
 	}
 }
 
@@ -160,12 +156,10 @@ func TestWriteRepoConfigStoresRepoRelativePathsAndUpdatesGitignore(t *testing.T)
 		deployment: deploymentOptions{
 			backupDir:          "/var/tmp/custom-sdup",
 			backupDirSet:       true,
-			logLines:           55,
+			logLines:           8,
 			logLinesSet:        true,
 			healthCheckWait:    7 * time.Second,
 			healthCheckWaitSet: true,
-			lockTimeout:        11 * time.Minute,
-			lockTimeoutSet:     true,
 		},
 		args:       []string{"../build/api", "prod"},
 		sshOptions: stringSliceFlag{"User=deploy"},
@@ -199,14 +193,14 @@ func TestWriteRepoConfigStoresRepoRelativePathsAndUpdatesGitignore(t *testing.T)
 	if !strings.Contains(content, "backup_dir = \"/var/tmp/custom-sdup\"") {
 		t.Fatalf("config missing backup_dir: %s", content)
 	}
-	if !strings.Contains(content, "log_lines = 55") {
+	if !strings.Contains(content, "log_lines = 8") {
 		t.Fatalf("config missing log_lines: %s", content)
 	}
 	if !strings.Contains(content, "health_check_wait = \"7s\"") {
 		t.Fatalf("config missing health_check_wait: %s", content)
 	}
-	if !strings.Contains(content, "lock_timeout = \"11m0s\"") {
-		t.Fatalf("config missing lock_timeout: %s", content)
+	if strings.Contains(content, "lock_timeout =") {
+		t.Fatalf("config should not include deprecated lock_timeout: %s", content)
 	}
 
 	gitignoreData, err := os.ReadFile(filepath.Join(repoDir, ".gitignore"))
@@ -227,14 +221,33 @@ func TestWriteRepoConfigStoresRepoRelativePathsAndUpdatesGitignore(t *testing.T)
 	if loaded.deployment.backupDir != "/var/tmp/custom-sdup" {
 		t.Fatalf("loaded backupDir = %q, want %q", loaded.deployment.backupDir, "/var/tmp/custom-sdup")
 	}
-	if loaded.deployment.logLines != 55 {
-		t.Fatalf("loaded logLines = %d, want %d", loaded.deployment.logLines, 55)
+	if loaded.deployment.logLines != 8 {
+		t.Fatalf("loaded logLines = %d, want %d", loaded.deployment.logLines, 8)
 	}
 	if loaded.deployment.healthCheckWait != 7*time.Second {
 		t.Fatalf("loaded healthCheckWait = %v, want %v", loaded.deployment.healthCheckWait, 7*time.Second)
 	}
-	if loaded.deployment.lockTimeout != 11*time.Minute {
-		t.Fatalf("loaded lockTimeout = %v, want %v", loaded.deployment.lockTimeout, 11*time.Minute)
+}
+
+func TestLoadRepoConfigRejectsRemovedDeployKeys(t *testing.T) {
+	repoDir := newRepoDirForTest(t)
+	configPath := filepath.Join(repoDir, repoConfigFileName)
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"local_path = \"build/api\"",
+		"remote_host = \"prod\"",
+		"",
+		"[deploy]",
+		"lock_timeout = \"13m\"",
+	}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	_, err := loadRepoConfig(configPath, repoDir)
+	if err == nil {
+		t.Fatal("loadRepoConfig returned nil error for removed deploy key")
+	}
+	if !strings.Contains(err.Error(), "unsupported key \"deploy.lock_timeout\"") {
+		t.Fatalf("loadRepoConfig error = %v, want unsupported deploy.lock_timeout", err)
 	}
 }
 

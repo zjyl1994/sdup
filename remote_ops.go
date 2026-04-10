@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,18 +16,12 @@ import (
 var execStartPathPattern = regexp.MustCompile(`path=([^ ;]+)`)
 var healthCheckSleepFn = time.Sleep
 
-type deploymentLockResult struct {
-	recoveredStaleLock bool
-}
-
 const progressRefreshInterval = 200 * time.Millisecond
 const progressBarWidth = 24
 
 type deploymentCheck struct {
 	execPath   string
-	backupDir  string
 	backupPath string
-	lockDir    string
 }
 
 func fetchExecStartPath(session sshclient.Session, unit string) (string, error) {
@@ -58,55 +51,8 @@ func runDeploymentChecks(session sshclient.Session, service string, opts deploym
 
 	return &deploymentCheck{
 		execPath:   execPath,
-		backupDir:  backupDir,
 		backupPath: filepath.Join(backupDir, "previous"),
-		lockDir:    filepath.Join(backupDir, ".deploy-lock"),
 	}, nil
-}
-
-func acquireDeploymentLock(session sshclient.Session, lockDir string, timeout time.Duration) (deploymentLockResult, error) {
-	_, err := runRemoteCommand(session, acquireDeploymentLockCommand(lockDir), fmt.Sprintf("acquire deployment lock %q", lockDir))
-	if err == nil {
-		if refreshErr := refreshDeploymentLock(session, lockDir); refreshErr != nil {
-			return deploymentLockResult{}, refreshErr
-		}
-		return deploymentLockResult{}, nil
-	}
-	if !isLockAlreadyHeldError(err) {
-		return deploymentLockResult{}, err
-	}
-
-	retry, recovered, recoverErr := recoverStaleDeploymentLock(session, lockDir, timeout)
-	if recoverErr != nil {
-		return deploymentLockResult{}, errors.Join(err, recoverErr)
-	}
-	if !retry {
-		return deploymentLockResult{}, err
-	}
-
-	if _, retryErr := runRemoteCommand(session, acquireDeploymentLockCommand(lockDir), fmt.Sprintf("acquire deployment lock %q", lockDir)); retryErr != nil {
-		return deploymentLockResult{}, retryErr
-	}
-	if refreshErr := refreshDeploymentLock(session, lockDir); refreshErr != nil {
-		return deploymentLockResult{}, refreshErr
-	}
-	return deploymentLockResult{recoveredStaleLock: recovered}, nil
-}
-
-func releaseDeploymentLock(session sshclient.Session, lockDir string) error {
-	if strings.TrimSpace(lockDir) == "" {
-		return nil
-	}
-	_, err := runRemoteCommand(session, releaseDeploymentLockCommand(lockDir), fmt.Sprintf("release deployment lock %q", lockDir))
-	return err
-}
-
-func refreshDeploymentLock(session sshclient.Session, lockDir string) error {
-	if strings.TrimSpace(lockDir) == "" {
-		return nil
-	}
-	_, err := runRemoteCommand(session, refreshDeploymentLockCommand(lockDir), fmt.Sprintf("refresh deployment lock %q", lockDir))
-	return err
 }
 
 func backupCurrentBinary(session sshclient.Session, execPath, backupPath string) error {
@@ -134,11 +80,8 @@ func verifyServiceActive(session sshclient.Session, service string) error {
 	return err
 }
 
-func verifyServiceStable(session sshclient.Session, service, lockDir string, waitWindow time.Duration) error {
+func verifyServiceStable(session sshclient.Session, service string, waitWindow time.Duration) error {
 	if err := verifyServiceActive(session, service); err != nil {
-		return err
-	}
-	if err := refreshDeploymentLock(session, lockDir); err != nil {
 		return err
 	}
 
@@ -153,11 +96,20 @@ func verifyServiceStable(session sshclient.Session, service, lockDir string, wai
 		if err := verifyServiceActive(session, service); err != nil {
 			return err
 		}
-		if err := refreshDeploymentLock(session, lockDir); err != nil {
-			return err
-		}
 	}
 	return nil
+}
+
+func fetchRecentServiceLogs(session sshclient.Session, service string, lines int) (string, error) {
+	out, err := session.Run(fetchRecentLogsCommand(service, lines))
+	trimmed := strings.TrimSpace(string(out))
+	if err != nil {
+		if trimmed == "" {
+			return "", fmt.Errorf("fetch recent logs for %q: %w", service, err)
+		}
+		return trimmed, fmt.Errorf("fetch recent logs for %q: %w; output: %s", service, err, trimmed)
+	}
+	return trimmed, nil
 }
 
 func rollbackBinary(session sshclient.Session, service, backupPath, execPath string) (string, error) {
@@ -173,88 +125,16 @@ func rollbackBinary(session sshclient.Session, service, backupPath, execPath str
 	return backupPath, nil
 }
 
-func recoverStaleDeploymentLock(session sshclient.Session, lockDir string, timeout time.Duration) (retry bool, recovered bool, err error) {
-	if timeout <= 0 {
-		return false, false, nil
-	}
-	exists, err := remoteDirExists(session, lockDir)
-	if err != nil {
-		return false, false, err
-	}
-	if !exists {
-		return true, false, nil
-	}
-
-	modifiedAt, err := remotePathModTime(session, lockDir)
-	if err != nil {
-		return false, false, err
-	}
-	if time.Since(modifiedAt) < timeout {
-		return false, false, nil
-	}
-	if _, err := runRemoteCommand(session, releaseDeploymentLockCommand(lockDir), fmt.Sprintf("remove stale deployment lock %q", lockDir)); err != nil {
-		return false, false, err
-	}
-	return true, true, nil
-}
-
-func remoteDirExists(session sshclient.Session, path string) (bool, error) {
-	out, err := session.Run(checkRemoteDirCommand(path))
-	if err == nil {
-		return true, nil
-	}
-	if strings.TrimSpace(string(out)) == "" {
-		return false, nil
-	}
-	return false, fmt.Errorf("check remote dir %q: %w; output: %s", path, err, strings.TrimSpace(string(out)))
-}
-
-func remotePathModTime(session sshclient.Session, path string) (time.Time, error) {
-	out, err := runRemoteCommand(session, statRemoteModTimeCommand(path), fmt.Sprintf("inspect remote path %q", path))
-	if err != nil {
-		return time.Time{}, err
-	}
-	seconds, parseErr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-	if parseErr != nil {
-		return time.Time{}, fmt.Errorf("parse remote path modtime %q: %w", path, parseErr)
-	}
-	return time.Unix(seconds, 0), nil
-}
-
-func isLockAlreadyHeldError(err error) bool {
-	return strings.Contains(strings.ToLower(err.Error()), "file exists")
-}
-
-func fetchRecentServiceLogs(session sshclient.Session, service string, lines int) (string, error) {
-	out, err := session.Run(fetchRecentLogsCommand(service, lines))
-	trimmed := strings.TrimSpace(string(out))
-	if err != nil {
-		if trimmed == "" {
-			return "", fmt.Errorf("fetch recent logs for %q: %w", service, err)
-		}
-		return trimmed, fmt.Errorf("fetch recent logs for %q: %w; output: %s", service, err, trimmed)
-	}
-	return trimmed, nil
-}
-
 type remoteStaging struct {
-	dir         string
-	filePath    string
-	remoteClean bool
+	dir      string
+	filePath string
 }
 
 func (s *remoteStaging) Cleanup(session sshclient.Session) error {
-	if s == nil || s.remoteClean {
+	if s == nil {
 		return nil
 	}
 	return cleanupRemoteTempDir(session, s.dir)
-}
-
-func (s *remoteStaging) MarkRemoteClean() {
-	if s == nil {
-		return
-	}
-	s.remoteClean = true
 }
 
 func extractExecStartPath(line string) (string, error) {
@@ -286,7 +166,7 @@ func uploadWithProgressToWriter(session sshclient.Session, localPath string, tot
 	}
 
 	renderer := newUploadProgressRenderer(writer)
-	renderer.Start(totalSize)
+	renderer.Start()
 
 	if err := session.Upload(localPath, staging.filePath, sshclient.UploadOptions{
 		OnProgress: renderer.Update,
@@ -361,7 +241,7 @@ func newUploadProgressRenderer(writer io.Writer) *uploadProgressRenderer {
 	return &uploadProgressRenderer{writer: writer}
 }
 
-func (r *uploadProgressRenderer) Start(totalSize int64) {
+func (r *uploadProgressRenderer) Start() {
 	now := time.Now()
 	r.startedAt = now
 	r.lastDisplayedAt = now
@@ -467,32 +347,12 @@ func checkRemoteExecutableCommand(execPath string) string {
 	return "sudo -n test -x " + shellQuote(execPath)
 }
 
-func checkRemoteDirCommand(path string) string {
-	return "sudo -n test -d " + shellQuote(path)
-}
-
 func ensureRemoteDirCommand(dir string) string {
 	return "sudo -n mkdir -p -- " + shellQuote(dir)
 }
 
-func acquireDeploymentLockCommand(lockDir string) string {
-	return "sudo -n mkdir -- " + shellQuote(lockDir)
-}
-
-func releaseDeploymentLockCommand(lockDir string) string {
-	return "sudo -n rmdir -- " + shellQuote(lockDir)
-}
-
-func refreshDeploymentLockCommand(lockDir string) string {
-	return "sudo -n touch -c -- " + shellQuote(lockDir)
-}
-
 func removeRemoteFileCommand(path string) string {
 	return "sudo -n rm -f -- " + shellQuote(path)
-}
-
-func statRemoteModTimeCommand(path string) string {
-	return "sudo -n stat -c %Y -- " + shellQuote(path)
 }
 
 func copyBinaryCommand(execPath, backupPath string) string {

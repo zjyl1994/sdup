@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -192,7 +191,6 @@ func TestUploadWithProgressCleansUpRemoteTempDirOnUploadError(t *testing.T) {
 func TestDeploySystemdUpdateCleansUpRemoteTempDirWhenRunFails(t *testing.T) {
 	localFile := filepathForTempFile(t)
 	execPath := "/usr/local/bin/api"
-	lockDir := filepath.Join(defaultDeployBackupDir, "api", ".deploy-lock")
 	session := &fakeRemoteSession{
 		commandResults: baseDeployCommandResults(localFile, "api", execPath),
 	}
@@ -210,15 +208,14 @@ func TestDeploySystemdUpdateCleansUpRemoteTempDirWhenRunFails(t *testing.T) {
 	if count := countCommand(session.runCommands, "rm -rf -- '/tmp/sdup.testdir'"); count != 1 {
 		t.Fatalf("cleanup command count = %d, want %d; commands = %v", count, 1, session.runCommands)
 	}
-	if count := countCommand(session.runCommands, releaseDeploymentLockCommand(lockDir)); count != 1 {
-		t.Fatalf("lock release command count = %d, want %d; commands = %v", count, 1, session.runCommands)
+	if count := countCommand(session.runCommands, fetchRecentLogsCommand("api", defaultDeployLogLines)); count != 1 {
+		t.Fatalf("recent logs command count = %d, want %d; commands = %v", count, 1, session.runCommands)
 	}
 }
 
 func TestDeploySystemdUpdateCleansUpOnceAfterSuccess(t *testing.T) {
 	localFile := filepathForTempFile(t)
 	execPath := "/usr/local/bin/api"
-	lockDir := filepath.Join(defaultDeployBackupDir, "api", ".deploy-lock")
 	backupPath := filepath.Join(defaultDeployBackupDir, "api", "previous")
 	session := &fakeRemoteSession{
 		commandResults: baseDeployCommandResults(localFile, "api", execPath),
@@ -235,11 +232,11 @@ func TestDeploySystemdUpdateCleansUpOnceAfterSuccess(t *testing.T) {
 	if count := countCommand(session.runCommands, "rm -rf -- '/tmp/sdup.testdir'"); count != 1 {
 		t.Fatalf("cleanup command count = %d, want %d; commands = %v", count, 1, session.runCommands)
 	}
-	if count := countCommand(session.runCommands, releaseDeploymentLockCommand(lockDir)); count != 1 {
-		t.Fatalf("lock release command count = %d, want %d; commands = %v", count, 1, session.runCommands)
-	}
 	if count := countCommand(session.runCommands, removeRemoteFileCommand(backupPath)); count != 1 {
 		t.Fatalf("backup cleanup command count = %d, want %d; commands = %v", count, 1, session.runCommands)
+	}
+	if count := countCommand(session.runCommands, fetchRecentLogsCommand("api", defaultDeployLogLines)); count != 1 {
+		t.Fatalf("recent logs command count = %d, want %d; commands = %v", count, 1, session.runCommands)
 	}
 }
 
@@ -283,6 +280,9 @@ func TestDeploySystemdUpdateRollsBackToPreviousBackupWhenServiceFailsHealthCheck
 	if count := countCommand(session.runCommands, installBinaryCommand(stagingPath, execPath)); count != 1 {
 		t.Fatalf("deploy install command count = %d, want %d; commands = %v", count, 1, session.runCommands)
 	}
+	if count := countCommand(session.runCommands, fetchRecentLogsCommand("api", defaultDeployLogLines)); count != 1 {
+		t.Fatalf("recent logs command count = %d, want %d; commands = %v", count, 1, session.runCommands)
+	}
 }
 
 func TestRunDeploymentChecksReturnsBackupPath(t *testing.T) {
@@ -306,68 +306,9 @@ func TestRunDeploymentChecksReturnsBackupPath(t *testing.T) {
 	if check.backupPath != filepath.Join(defaultDeployBackupDir, "api", "previous") {
 		t.Fatalf("backupPath = %q, want %q", check.backupPath, filepath.Join(defaultDeployBackupDir, "api", "previous"))
 	}
-	if check.lockDir != filepath.Join(defaultDeployBackupDir, "api", ".deploy-lock") {
-		t.Fatalf("lockDir = %q, want %q", check.lockDir, filepath.Join(defaultDeployBackupDir, "api", ".deploy-lock"))
-	}
-}
-
-func TestDeploySystemdUpdateFailsWhenLockAlreadyHeld(t *testing.T) {
-	localFile := filepathForTempFile(t)
-	execPath := "/usr/local/bin/api"
-	lockDir := filepath.Join(defaultDeployBackupDir, "api", ".deploy-lock")
-	session := &fakeRemoteSession{
-		commandResults: baseDeployCommandResults(localFile, "api", execPath),
-	}
-	session.commandResults[acquireDeploymentLockCommand(lockDir)] = []commandResult{{err: errors.New("file exists")}}
-	session.commandResults[checkRemoteDirCommand(lockDir)] = []commandResult{{}}
-	session.commandResults[statRemoteModTimeCommand(lockDir)] = []commandResult{{output: []byte(strconv.FormatInt(time.Now().Unix(), 10) + "\n")}}
-
-	totalSize, err := localFileSize(localFile)
-	if err != nil {
-		t.Fatalf("localFileSize returned error: %v", err)
-	}
-
-	err = deploySystemdUpdate(session, localFile, "api", totalSize, deploymentTestOptions())
-	if err == nil {
-		t.Fatal("deploySystemdUpdate returned nil error")
-	}
-	if count := countCommand(session.runCommands, acquireDeploymentLockCommand(lockDir)); count != 1 {
-		t.Fatalf("lock acquire count = %d, want %d; commands = %v", count, 1, session.runCommands)
-	}
-	if count := countCommand(session.runCommands, "mktemp -d -t sdup.XXXXXX"); count != 0 {
-		t.Fatalf("unexpected upload staging creation count = %d; commands = %v", count, session.runCommands)
-	}
-}
-
-func TestDeploySystemdUpdateRecoversStaleLockAndContinues(t *testing.T) {
-	localFile := filepathForTempFile(t)
-	execPath := "/usr/local/bin/api"
-	lockDir := filepath.Join(defaultDeployBackupDir, "api", ".deploy-lock")
-	session := &fakeRemoteSession{
-		commandResults: baseDeployCommandResults(localFile, "api", execPath),
-	}
-	session.commandResults[acquireDeploymentLockCommand(lockDir)] = []commandResult{{err: errors.New("file exists")}, {}}
-	session.commandResults[checkRemoteDirCommand(lockDir)] = []commandResult{{}}
-	session.commandResults[statRemoteModTimeCommand(lockDir)] = []commandResult{{output: []byte(strconv.FormatInt(time.Now().Add(-2*defaultDeployLockTimeout).Unix(), 10) + "\n")}}
-
-	totalSize, err := localFileSize(localFile)
-	if err != nil {
-		t.Fatalf("localFileSize returned error: %v", err)
-	}
-
-	if err := deploySystemdUpdate(session, localFile, "api", totalSize, deploymentTestOptions()); err != nil {
-		t.Fatalf("deploySystemdUpdate returned error: %v", err)
-	}
-	if count := countCommand(session.runCommands, acquireDeploymentLockCommand(lockDir)); count != 2 {
-		t.Fatalf("lock acquire count = %d, want %d; commands = %v", count, 2, session.runCommands)
-	}
-	if count := countCommand(session.runCommands, releaseDeploymentLockCommand(lockDir)); count != 2 {
-		t.Fatalf("lock release count = %d, want %d; commands = %v", count, 2, session.runCommands)
-	}
 }
 
 func TestVerifyServiceStableHonorsWaitWindow(t *testing.T) {
-	lockDir := filepath.Join(defaultDeployBackupDir, "api", ".deploy-lock")
 	session := &fakeRemoteSession{
 		commandResults: map[string][]commandResult{
 			verifyServiceActiveCommand("api"): {{output: []byte("active\n")}, {output: []byte("active\n")}, {output: []byte("active\n")}},
@@ -379,14 +320,11 @@ func TestVerifyServiceStableHonorsWaitWindow(t *testing.T) {
 	healthCheckSleepFn = func(time.Duration) { sleeps++ }
 	defer func() { healthCheckSleepFn = origSleep }()
 
-	if err := verifyServiceStable(session, "api", lockDir, 1500*time.Millisecond); err != nil {
+	if err := verifyServiceStable(session, "api", 1500*time.Millisecond); err != nil {
 		t.Fatalf("verifyServiceStable returned error: %v", err)
 	}
 	if count := countCommand(session.runCommands, verifyServiceActiveCommand("api")); count != 3 {
 		t.Fatalf("verify command count = %d, want %d", count, 3)
-	}
-	if count := countCommand(session.runCommands, refreshDeploymentLockCommand(lockDir)); count != 3 {
-		t.Fatalf("lock refresh count = %d, want %d", count, 3)
 	}
 	if sleeps != 2 {
 		t.Fatalf("sleep count = %d, want %d", sleeps, 2)
@@ -474,21 +412,19 @@ func filepathForTempFile(t *testing.T) string {
 func baseDeployCommandResults(localFile, service, execPath string) map[string][]commandResult {
 	backupDir := filepath.Join(defaultDeployBackupDir, service)
 	backupPath := filepath.Join(backupDir, "previous")
-	lockDir := filepath.Join(backupDir, ".deploy-lock")
 	stagingPath := filepath.Join("/tmp/sdup.testdir", filepath.Base(localFile))
 	return map[string][]commandResult{
 		fetchExecStartCommand(service):                         {{output: []byte("ExecStart=" + execPath + " --serve\n")}},
+		fetchRecentLogsCommand(service, defaultDeployLogLines): {{output: []byte("recent log\n")}},
 		ensureSudoCommand():                                    {{}},
 		checkRemoteExecutableCommand(execPath):                 {{}},
 		ensureRemoteDirCommand(backupDir):                      {{}},
-		acquireDeploymentLockCommand(lockDir):                  {{}},
 		"mktemp -d -t sdup.XXXXXX":                             {{output: []byte("/tmp/sdup.testdir\n")}},
 		copyBinaryCommand(execPath, backupPath):                {{}},
 		installBinaryCommand(stagingPath, execPath):            {{}},
 		restartServiceCommand(service):                         {{}},
 		verifyServiceActiveCommand(service):                    {{output: []byte("active\n")}},
 		removeRemoteFileCommand(backupPath):                    {{}},
-		fetchRecentLogsCommand(service, defaultDeployLogLines): {{output: []byte("recent log\n")}},
 	}
 }
 
@@ -497,7 +433,6 @@ func deploymentTestOptions() deploymentOptions {
 		backupDir:       defaultDeployBackupDir,
 		logLines:        defaultDeployLogLines,
 		healthCheckWait: 0,
-		lockTimeout:     defaultDeployLockTimeout,
 	}
 }
 

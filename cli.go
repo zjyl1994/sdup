@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const usageText = "Usage: sdup [flags] [local_path] [remote_host]\nLoads repo-local .sdup.toml from the git root when present. Use -w/-W to write the current effective arguments into that file and exit.\nFlags are case-insensitive and may appear before or after positional args: -p/-P <port>, -s <service>, -i <identity>, -o <key=value>, -f/-F <config>, -k/-K (ignore known_hosts), -w/-W (write repo config)\n"
+const usageText = "Usage: sdup [flags] [local_path] [remote_host]\nLoads repo-local .sdup.toml from the git root when present. Use -w/-W to write the current effective arguments into that file and exit.\nFlags are case-insensitive and may appear before or after positional args: -p/-P <port>, -s <service>, -i <identity>, -o <key=value>, -f/-F <config>, -n/-N <log_lines>, -k/-K (ignore known_hosts), -w/-W (write repo config)\n"
 
 type cliOptions struct {
 	sshPort          int
@@ -35,6 +35,7 @@ func parseCLIArgs(args []string) (cliOptions, error) {
 	fs.Var(&opts.sshOptions, "o", "SSH option in key=value form")
 	fs.BoolVar(&opts.ignoreKnownHosts, "k", false, "Ignore SSH known_hosts host key verification")
 	fs.StringVar(&opts.remoteService, "s", "", "Remote service")
+	fs.IntVar(&opts.deployment.logLines, "n", defaultDeployLogLines, "Recent journal lines to print after deploy (0 disables)")
 	fs.BoolVar(&opts.writeConfig, "w", false, "Write repo-local .sdup.toml from current arguments and exit")
 
 	if err := fs.Parse(reorderCLIArgs(fs, args)); err != nil {
@@ -46,8 +47,13 @@ func parseCLIArgs(args []string) (cliOptions, error) {
 			opts.sshPortSet = true
 		case "f":
 			opts.sshConfigSet = true
+		case "n":
+			opts.deployment.logLinesSet = true
 		}
 	})
+	if opts.deployment.logLines < 0 {
+		return cliOptions{}, fmt.Errorf("log_lines must be >= 0")
+	}
 	if fs.NArg() > 2 {
 		return cliOptions{}, fmt.Errorf("expected at most 2 positional arguments, got %d", fs.NArg())
 	}

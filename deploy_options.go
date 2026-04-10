@@ -3,9 +3,8 @@ package main
 import "time"
 
 const defaultDeployBackupDir = "/var/tmp/sdup"
-const defaultDeployLogLines = 10
+const defaultDeployLogLines = 5
 const defaultHealthCheckWait = 5 * time.Second
-const defaultDeployLockTimeout = 15 * time.Minute
 const healthCheckPollInterval = time.Second
 
 type deploymentOptions struct {
@@ -15,8 +14,6 @@ type deploymentOptions struct {
 	logLinesSet        bool
 	healthCheckWait    time.Duration
 	healthCheckWaitSet bool
-	lockTimeout        time.Duration
-	lockTimeoutSet     bool
 }
 
 func defaultDeploymentOptions() deploymentOptions {
@@ -24,7 +21,6 @@ func defaultDeploymentOptions() deploymentOptions {
 		backupDir:       defaultDeployBackupDir,
 		logLines:        defaultDeployLogLines,
 		healthCheckWait: defaultHealthCheckWait,
-		lockTimeout:     defaultDeployLockTimeout,
 	}
 }
 
@@ -41,10 +37,6 @@ func buildDeploymentOptions(opts cliOptions) deploymentOptions {
 	if opts.deployment.healthCheckWaitSet {
 		resolved.healthCheckWait = opts.deployment.healthCheckWait
 		resolved.healthCheckWaitSet = true
-	}
-	if opts.deployment.lockTimeoutSet {
-		resolved.lockTimeout = opts.deployment.lockTimeout
-		resolved.lockTimeoutSet = true
 	}
 	return resolved
 }
