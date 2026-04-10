@@ -64,7 +64,7 @@ func TestSystemdUpdatePrintsLocalSizeBeforeSSH(t *testing.T) {
 	}
 
 	reported := false
-	deployOpts := deploymentOptions{backupDir: "/var/tmp/custom", healthCheckWait: 2}
+	deployOpts := deploymentOptions{healthCheckWait: 2}
 	reportUploadStartFn = func(totalSize int64) {
 		reported = true
 		if totalSize != int64(len(content)) {

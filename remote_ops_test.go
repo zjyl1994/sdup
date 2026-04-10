@@ -216,7 +216,8 @@ func TestDeploySystemdUpdateCleansUpRemoteTempDirWhenRunFails(t *testing.T) {
 func TestDeploySystemdUpdateCleansUpOnceAfterSuccess(t *testing.T) {
 	localFile := filepathForTempFile(t)
 	execPath := "/usr/local/bin/api"
-	backupPath := filepath.Join(defaultDeployBackupDir, "api", "previous")
+	stagingPath := filepath.Join("/tmp/sdup.testdir", filepath.Base(localFile))
+	backupPath := backupPathForUploadedBinary(stagingPath, execPath)
 	session := &fakeRemoteSession{
 		commandResults: baseDeployCommandResults(localFile, "api", execPath),
 	}
@@ -243,8 +244,8 @@ func TestDeploySystemdUpdateCleansUpOnceAfterSuccess(t *testing.T) {
 func TestDeploySystemdUpdateRollsBackToPreviousBackupWhenServiceFailsHealthCheck(t *testing.T) {
 	localFile := filepathForTempFile(t)
 	execPath := "/usr/local/bin/api"
-	backupPath := filepath.Join(defaultDeployBackupDir, "api", "previous")
 	stagingPath := filepath.Join("/tmp/sdup.testdir", filepath.Base(localFile))
+	backupPath := backupPathForUploadedBinary(stagingPath, execPath)
 	session := &fakeRemoteSession{
 		commandResults: baseDeployCommandResults(localFile, "api", execPath),
 	}
@@ -260,7 +261,6 @@ func TestDeploySystemdUpdateRollsBackToPreviousBackupWhenServiceFailsHealthCheck
 	defer func() { healthCheckSleepFn = origSleep }()
 
 	err = deploySystemdUpdate(session, localFile, "api", totalSize, deploymentOptions{
-		backupDir:          defaultDeployBackupDir,
 		logLines:           defaultDeployLogLines,
 		healthCheckWait:    1500 * time.Millisecond,
 		healthCheckWaitSet: true,
@@ -285,26 +285,78 @@ func TestDeploySystemdUpdateRollsBackToPreviousBackupWhenServiceFailsHealthCheck
 	}
 }
 
-func TestRunDeploymentChecksReturnsBackupPath(t *testing.T) {
+func TestDeploySystemdUpdateWaitsForServiceToBecomeActive(t *testing.T) {
+	localFile := filepathForTempFile(t)
+	execPath := "/usr/local/bin/api"
+	stagingPath := filepath.Join("/tmp/sdup.testdir", filepath.Base(localFile))
+	backupPath := backupPathForUploadedBinary(stagingPath, execPath)
+	session := &fakeRemoteSession{
+		commandResults: baseDeployCommandResults(localFile, "api", execPath),
+	}
+	session.commandResults[verifyServiceActiveCommand("api")] = []commandResult{
+		{output: []byte("activating\n"), err: errors.New("activating")},
+		{output: []byte("active\n")},
+		{output: []byte("active\n")},
+	}
+
+	totalSize, err := localFileSize(localFile)
+	if err != nil {
+		t.Fatalf("localFileSize returned error: %v", err)
+	}
+
+	origSleep := healthCheckSleepFn
+	healthCheckSleepFn = func(time.Duration) {}
+	defer func() { healthCheckSleepFn = origSleep }()
+
+	err = deploySystemdUpdate(session, localFile, "api", totalSize, deploymentOptions{
+		logLines:           defaultDeployLogLines,
+		healthCheckWait:    1500 * time.Millisecond,
+		healthCheckWaitSet: true,
+	})
+	if err != nil {
+		t.Fatalf("deploySystemdUpdate returned error: %v", err)
+	}
+	if count := countCommand(session.runCommands, restartServiceCommand("api")); count != 1 {
+		t.Fatalf("restart command count = %d, want %d; commands = %v", count, 1, session.runCommands)
+	}
+	if count := countCommand(session.runCommands, installBinaryCommand(backupPath, execPath)); count != 0 {
+		t.Fatalf("rollback install command count = %d, want %d; commands = %v", count, 0, session.runCommands)
+	}
+	if count := countCommand(session.runCommands, verifyServiceActiveCommand("api")); count != 3 {
+		t.Fatalf("verify command count = %d, want %d; commands = %v", count, 3, session.runCommands)
+	}
+}
+
+func TestRunDeploymentChecksLeavesBackupPathEmptyBeforeUpload(t *testing.T) {
 	execPath := "/usr/local/bin/api"
 	session := &fakeRemoteSession{
 		commandResults: map[string][]commandResult{
-			fetchExecStartCommand("api"):                                         {{output: []byte("ExecStart=/usr/local/bin/api --serve\n")}},
-			ensureSudoCommand():                                                  {{}},
-			checkRemoteExecutableCommand(execPath):                               {{}},
-			ensureRemoteDirCommand(filepath.Join(defaultDeployBackupDir, "api")): {{}},
+			fetchExecStartCommand("api"):           {{output: []byte("ExecStart=/usr/local/bin/api --serve\n")}},
+			ensureSudoCommand():                    {{}},
+			checkRemoteExecutableCommand(execPath): {{}},
 		},
 	}
 
-	check, err := runDeploymentChecks(session, "api", deploymentTestOptions())
+	check, err := runDeploymentChecks(session, "api")
 	if err != nil {
 		t.Fatalf("runDeploymentChecks returned error: %v", err)
 	}
 	if check.execPath != execPath {
 		t.Fatalf("execPath = %q, want %q", check.execPath, execPath)
 	}
-	if check.backupPath != filepath.Join(defaultDeployBackupDir, "api", "previous") {
-		t.Fatalf("backupPath = %q, want %q", check.backupPath, filepath.Join(defaultDeployBackupDir, "api", "previous"))
+	if check.backupPath != "" {
+		t.Fatalf("backupPath = %q, want empty before upload", check.backupPath)
+	}
+}
+
+func TestBackupPathForUploadedBinaryAvoidsNameConflict(t *testing.T) {
+	stagingPath := "/tmp/sdup.testdir/api.previous"
+	execPath := "/usr/local/bin/api"
+
+	got := backupPathForUploadedBinary(stagingPath, execPath)
+	want := "/tmp/sdup.testdir/api.previous.1"
+	if got != want {
+		t.Fatalf("backupPathForUploadedBinary() = %q, want %q", got, want)
 	}
 }
 
@@ -312,6 +364,33 @@ func TestVerifyServiceStableHonorsWaitWindow(t *testing.T) {
 	session := &fakeRemoteSession{
 		commandResults: map[string][]commandResult{
 			verifyServiceActiveCommand("api"): {{output: []byte("active\n")}, {output: []byte("active\n")}, {output: []byte("active\n")}},
+		},
+	}
+
+	sleeps := 0
+	origSleep := healthCheckSleepFn
+	healthCheckSleepFn = func(time.Duration) { sleeps++ }
+	defer func() { healthCheckSleepFn = origSleep }()
+
+	if err := verifyServiceStable(session, "api", 1500*time.Millisecond); err != nil {
+		t.Fatalf("verifyServiceStable returned error: %v", err)
+	}
+	if count := countCommand(session.runCommands, verifyServiceActiveCommand("api")); count != 3 {
+		t.Fatalf("verify command count = %d, want %d", count, 3)
+	}
+	if sleeps != 2 {
+		t.Fatalf("sleep count = %d, want %d", sleeps, 2)
+	}
+}
+
+func TestVerifyServiceStableWaitsForServiceToBecomeActive(t *testing.T) {
+	session := &fakeRemoteSession{
+		commandResults: map[string][]commandResult{
+			verifyServiceActiveCommand("api"): {
+				{output: []byte("activating\n"), err: errors.New("activating")},
+				{output: []byte("active\n")},
+				{output: []byte("active\n")},
+			},
 		},
 	}
 
@@ -410,15 +489,13 @@ func filepathForTempFile(t *testing.T) string {
 }
 
 func baseDeployCommandResults(localFile, service, execPath string) map[string][]commandResult {
-	backupDir := filepath.Join(defaultDeployBackupDir, service)
-	backupPath := filepath.Join(backupDir, "previous")
 	stagingPath := filepath.Join("/tmp/sdup.testdir", filepath.Base(localFile))
+	backupPath := backupPathForUploadedBinary(stagingPath, execPath)
 	return map[string][]commandResult{
 		fetchExecStartCommand(service):                         {{output: []byte("ExecStart=" + execPath + " --serve\n")}},
 		fetchRecentLogsCommand(service, defaultDeployLogLines): {{output: []byte("recent log\n")}},
 		ensureSudoCommand():                                    {{}},
 		checkRemoteExecutableCommand(execPath):                 {{}},
-		ensureRemoteDirCommand(backupDir):                      {{}},
 		"mktemp -d -t sdup.XXXXXX":                             {{output: []byte("/tmp/sdup.testdir\n")}},
 		copyBinaryCommand(execPath, backupPath):                {{}},
 		installBinaryCommand(stagingPath, execPath):            {{}},
@@ -430,7 +507,6 @@ func baseDeployCommandResults(localFile, service, execPath string) map[string][]
 
 func deploymentTestOptions() deploymentOptions {
 	return deploymentOptions{
-		backupDir:       defaultDeployBackupDir,
 		logLines:        defaultDeployLogLines,
 		healthCheckWait: 0,
 	}

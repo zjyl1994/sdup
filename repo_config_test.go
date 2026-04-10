@@ -23,7 +23,6 @@ func TestResolveInvocationOptionsUsesRepoConfig(t *testing.T) {
 		"options = [\"User=deploy\", \"HostName=10.0.0.10\"]",
 		"",
 		"[deploy]",
-		"backup_dir = \"/var/tmp/custom-sdup\"",
 		"log_lines = 7",
 		"health_check_wait = \"9s\"",
 	}, "\n")+"\n"), 0o600); err != nil {
@@ -66,9 +65,6 @@ func TestResolveInvocationOptionsUsesRepoConfig(t *testing.T) {
 	}
 	if !equalStringSlices([]string(opts.sshOptions), []string{"User=deploy", "HostName=10.0.0.10"}) {
 		t.Fatalf("sshOptions = %v", []string(opts.sshOptions))
-	}
-	if opts.deployment.backupDir != "/var/tmp/custom-sdup" {
-		t.Fatalf("backupDir = %q, want %q", opts.deployment.backupDir, "/var/tmp/custom-sdup")
 	}
 	if opts.deployment.logLines != 7 {
 		t.Fatalf("logLines = %d, want %d", opts.deployment.logLines, 7)
@@ -125,9 +121,6 @@ func TestResolveInvocationOptionsCLIOverridesRepoConfig(t *testing.T) {
 	if !equalStringSlices([]string(opts.sshOptions), []string{"HostName=10.0.0.10", "HostName=10.0.0.20"}) {
 		t.Fatalf("sshOptions = %v", []string(opts.sshOptions))
 	}
-	if opts.deployment.backupDir != defaultDeployBackupDir {
-		t.Fatalf("backupDir = %q, want %q", opts.deployment.backupDir, defaultDeployBackupDir)
-	}
 	if opts.deployment.logLines != 8 {
 		t.Fatalf("logLines = %d, want %d", opts.deployment.logLines, 8)
 	}
@@ -154,8 +147,6 @@ func TestWriteRepoConfigStoresRepoRelativePathsAndUpdatesGitignore(t *testing.T)
 		sshPortSet:    true,
 		remoteService: "api",
 		deployment: deploymentOptions{
-			backupDir:          "/var/tmp/custom-sdup",
-			backupDirSet:       true,
 			logLines:           8,
 			logLinesSet:        true,
 			healthCheckWait:    7 * time.Second,
@@ -190,9 +181,6 @@ func TestWriteRepoConfigStoresRepoRelativePathsAndUpdatesGitignore(t *testing.T)
 	if !strings.Contains(content, "[deploy]") {
 		t.Fatalf("config missing deploy section: %s", content)
 	}
-	if !strings.Contains(content, "backup_dir = \"/var/tmp/custom-sdup\"") {
-		t.Fatalf("config missing backup_dir: %s", content)
-	}
 	if !strings.Contains(content, "log_lines = 8") {
 		t.Fatalf("config missing log_lines: %s", content)
 	}
@@ -218,9 +206,6 @@ func TestWriteRepoConfigStoresRepoRelativePathsAndUpdatesGitignore(t *testing.T)
 	if loaded.localPath != filepath.Join(repoDir, "build", "api") {
 		t.Fatalf("loaded localPath = %q, want %q", loaded.localPath, filepath.Join(repoDir, "build", "api"))
 	}
-	if loaded.deployment.backupDir != "/var/tmp/custom-sdup" {
-		t.Fatalf("loaded backupDir = %q, want %q", loaded.deployment.backupDir, "/var/tmp/custom-sdup")
-	}
 	if loaded.deployment.logLines != 8 {
 		t.Fatalf("loaded logLines = %d, want %d", loaded.deployment.logLines, 8)
 	}
@@ -230,24 +215,37 @@ func TestWriteRepoConfigStoresRepoRelativePathsAndUpdatesGitignore(t *testing.T)
 }
 
 func TestLoadRepoConfigRejectsRemovedDeployKeys(t *testing.T) {
-	repoDir := newRepoDirForTest(t)
-	configPath := filepath.Join(repoDir, repoConfigFileName)
-	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
-		"local_path = \"build/api\"",
-		"remote_host = \"prod\"",
-		"",
-		"[deploy]",
-		"lock_timeout = \"13m\"",
-	}, "\n")+"\n"), 0o600); err != nil {
-		t.Fatalf("WriteFile returned error: %v", err)
+	tests := []struct {
+		name    string
+		keyLine string
+		want    string
+	}{
+		{name: "backup_dir", keyLine: "backup_dir = \"/var/tmp/custom-sdup\"", want: "unsupported key \"deploy.backup_dir\""},
+		{name: "lock_timeout", keyLine: "lock_timeout = \"13m\"", want: "unsupported key \"deploy.lock_timeout\""},
 	}
 
-	_, err := loadRepoConfig(configPath, repoDir)
-	if err == nil {
-		t.Fatal("loadRepoConfig returned nil error for removed deploy key")
-	}
-	if !strings.Contains(err.Error(), "unsupported key \"deploy.lock_timeout\"") {
-		t.Fatalf("loadRepoConfig error = %v, want unsupported deploy.lock_timeout", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoDir := newRepoDirForTest(t)
+			configPath := filepath.Join(repoDir, repoConfigFileName)
+			if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+				"local_path = \"build/api\"",
+				"remote_host = \"prod\"",
+				"",
+				"[deploy]",
+				tt.keyLine,
+			}, "\n")+"\n"), 0o600); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			_, err := loadRepoConfig(configPath, repoDir)
+			if err == nil {
+				t.Fatal("loadRepoConfig returned nil error for removed deploy key")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("loadRepoConfig error = %v, want %s", err, tt.want)
+			}
+		})
 	}
 }
 

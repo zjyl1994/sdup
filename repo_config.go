@@ -49,7 +49,6 @@ type repoSSHDocument struct {
 }
 
 type repoDeployDocument struct {
-	BackupDir       *string `toml:"backup_dir,omitempty"`
 	LogLines        *int    `toml:"log_lines,omitempty"`
 	HealthCheckWait *string `toml:"health_check_wait,omitempty"`
 }
@@ -256,13 +255,6 @@ func repoConfigFromDocument(doc repoConfigDocument, baseDir string) (repoConfig,
 	}
 
 	if doc.Deploy != nil {
-		if doc.Deploy.BackupDir != nil {
-			if strings.TrimSpace(*doc.Deploy.BackupDir) == "" {
-				return repoConfig{}, fmt.Errorf("backup_dir must not be empty")
-			}
-			cfg.deployment.backupDir = *doc.Deploy.BackupDir
-			cfg.deployment.backupDirSet = true
-		}
 		if doc.Deploy.LogLines != nil {
 			if *doc.Deploy.LogLines < 0 {
 				return repoConfig{}, fmt.Errorf("log_lines must be >= 0")
@@ -435,11 +427,6 @@ func buildRepoDeployDocument(cfg repoConfig) *repoDeployDocument {
 	doc := &repoDeployDocument{}
 	hasValues := false
 
-	if cfg.deployment.backupDirSet {
-		value := cfg.deployment.backupDir
-		doc.BackupDir = &value
-		hasValues = true
-	}
 	if cfg.deployment.logLinesSet {
 		value := cfg.deployment.logLines
 		doc.LogLines = &value

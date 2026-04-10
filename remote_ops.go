@@ -32,7 +32,7 @@ func fetchExecStartPath(session sshclient.Session, unit string) (string, error) 
 	return extractExecStartPath(strings.TrimSpace(string(out)))
 }
 
-func runDeploymentChecks(session sshclient.Session, service string, opts deploymentOptions) (*deploymentCheck, error) {
+func runDeploymentChecks(session sshclient.Session, service string) (*deploymentCheck, error) {
 	execPath, err := fetchExecStartPath(session, service)
 	if err != nil {
 		return nil, err
@@ -44,15 +44,25 @@ func runDeploymentChecks(session sshclient.Session, service string, opts deploym
 		return nil, err
 	}
 
-	backupDir := filepath.Join(opts.backupDir, service)
-	if _, err := runRemoteCommand(session, ensureRemoteDirCommand(backupDir), fmt.Sprintf("prepare backup dir %q", backupDir)); err != nil {
-		return nil, err
+	return &deploymentCheck{
+		execPath: execPath,
+	}, nil
+}
+
+func backupPathForUploadedBinary(stagingPath, execPath string) string {
+	stagingDir := filepath.Dir(stagingPath)
+	uploadName := filepath.Base(stagingPath)
+	backupBase := filepath.Base(execPath) + ".previous"
+	if backupBase != uploadName {
+		return filepath.Join(stagingDir, backupBase)
 	}
 
-	return &deploymentCheck{
-		execPath:   execPath,
-		backupPath: filepath.Join(backupDir, "previous"),
-	}, nil
+	for suffix := 1; ; suffix++ {
+		candidate := fmt.Sprintf("%s.%d", backupBase, suffix)
+		if candidate != uploadName {
+			return filepath.Join(stagingDir, candidate)
+		}
+	}
 }
 
 func backupCurrentBinary(session sshclient.Session, execPath, backupPath string) error {
@@ -81,11 +91,22 @@ func verifyServiceActive(session sshclient.Session, service string) error {
 }
 
 func verifyServiceStable(session sshclient.Session, service string, waitWindow time.Duration) error {
-	if err := verifyServiceActive(session, service); err != nil {
-		return err
+	remaining := waitWindow
+	for {
+		if err := verifyServiceActive(session, service); err == nil {
+			break
+		} else if remaining <= 0 {
+			return err
+		}
+
+		sleepFor := healthCheckPollInterval
+		if remaining < sleepFor {
+			sleepFor = remaining
+		}
+		healthCheckSleepFn(sleepFor)
+		remaining -= sleepFor
 	}
 
-	remaining := waitWindow
 	for remaining > 0 {
 		sleepFor := healthCheckPollInterval
 		if remaining < sleepFor {

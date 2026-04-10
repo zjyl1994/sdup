@@ -37,7 +37,7 @@ func SystemdUpdate(localFile, remoteService, remoteHost string, sshOptions sshCL
 func deploySystemdUpdate(session sshclient.Session, localFile, remoteService string, totalSize int64, deployOpts deploymentOptions) (err error) {
 	defer printRecentServiceLogs(session, remoteService, deployOpts.logLines)
 
-	check, err := runDeploymentChecks(session, remoteService, deployOpts)
+	check, err := runDeploymentChecks(session, remoteService)
 	if err != nil {
 		return err
 	}
@@ -48,6 +48,7 @@ func deploySystemdUpdate(session sshclient.Session, localFile, remoteService str
 		return err
 	}
 	defer staging.Cleanup(session)
+	check.backupPath = backupPathForUploadedBinary(staging.filePath, check.execPath)
 
 	if err := backupCurrentBinary(session, check.execPath, check.backupPath); err != nil {
 		return err
