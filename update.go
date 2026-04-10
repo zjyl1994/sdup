@@ -15,7 +15,7 @@ var (
 	reportUploadStartFn   = reportUploadStart
 )
 
-func SystemdUpdate(localFile, remoteService, remoteHost string, sshOptions sshCLIOptions, deployOpts deploymentOptions) error {
+func SystemdUpdate(localFile, remoteService, remoteHost string, sshOptions sshclient.Options, deployOpts deploymentOptions) error {
 	if err := validateLocalFile(localFile); err != nil {
 		return err
 	}

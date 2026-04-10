@@ -2,10 +2,8 @@ package main
 
 import "github.com/zjyl1994/sdup/pkg/sshclient"
 
-type sshCLIOptions = sshclient.Options
-
-func buildSSHOptions(inv resolvedInvocation) sshCLIOptions {
-	sshOptions := sshCLIOptions{
+func buildSSHOptions(inv resolvedInvocation) sshclient.Options {
+	sshOptions := sshclient.Options{
 		ConfigPath:       inv.ssh.configPath,
 		IdentityFiles:    cloneStrings(inv.ssh.identityFiles),
 		RawOptions:       cloneStrings(inv.ssh.rawOptions),

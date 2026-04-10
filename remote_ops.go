@@ -421,10 +421,6 @@ func checkRemoteExecutableCommand(execPath string) string {
 	return "sudo -n test -x " + shellQuote(execPath)
 }
 
-func ensureRemoteDirCommand(dir string) string {
-	return "sudo -n mkdir -p -- " + shellQuote(dir)
-}
-
 func removeRemoteFileCommand(path string) string {
 	return "sudo -n rm -f -- " + shellQuote(path)
 }

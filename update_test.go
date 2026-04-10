@@ -35,7 +35,7 @@ func TestSystemdUpdateSkipsSSHWhenLocalFileMissing(t *testing.T) {
 		return nil
 	}
 
-	err := SystemdUpdate("/tmp/definitely-missing-sdup-binary", "api", "prod", sshCLIOptions{}, deployOpts)
+	err := SystemdUpdate("/tmp/definitely-missing-sdup-binary", "api", "prod", sshclient.Options{}, deployOpts)
 	if err == nil {
 		t.Fatal("SystemdUpdate returned nil error for missing file")
 	}
@@ -87,7 +87,7 @@ func TestSystemdUpdatePrintsLocalSizeBeforeSSH(t *testing.T) {
 		return nil
 	}
 
-	if err := SystemdUpdate(localFile, "api", "prod", sshCLIOptions{}, deployOpts); err != nil {
+	if err := SystemdUpdate(localFile, "api", "prod", sshclient.Options{}, deployOpts); err != nil {
 		t.Fatalf("SystemdUpdate returned error: %v", err)
 	}
 	if !reported {
