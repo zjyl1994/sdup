@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 const repoConfigFileName = ".sdup.toml"
@@ -19,6 +22,7 @@ type repoConfig struct {
 	localPath        string
 	remoteHost       string
 	remoteService    string
+	deployment       deploymentOptions
 	sshPort          int
 	sshPortSet       bool
 	sshConfigPath    string
@@ -26,6 +30,29 @@ type repoConfig struct {
 	identityFiles    []string
 	sshOptions       []string
 	ignoreKnownHosts bool
+}
+
+type repoConfigDocument struct {
+	LocalPath     string              `toml:"local_path"`
+	RemoteHost    string              `toml:"remote_host"`
+	RemoteService string              `toml:"remote_service"`
+	SSH           *repoSSHDocument    `toml:"ssh,omitempty"`
+	Deploy        *repoDeployDocument `toml:"deploy,omitempty"`
+}
+
+type repoSSHDocument struct {
+	Config           *string  `toml:"config,omitempty"`
+	Port             *int     `toml:"port,omitempty"`
+	IgnoreKnownHosts *bool    `toml:"ignore_known_hosts,omitempty"`
+	IdentityFiles    []string `toml:"identity_files,omitempty"`
+	Options          []string `toml:"options,omitempty"`
+}
+
+type repoDeployDocument struct {
+	BackupDir       *string `toml:"backup_dir,omitempty"`
+	LogLines        *int    `toml:"log_lines,omitempty"`
+	HealthCheckWait *string `toml:"health_check_wait,omitempty"`
+	LockTimeout     *string `toml:"lock_timeout,omitempty"`
 }
 
 func resolveInvocationOptions(cli cliOptions, cwd string) (cliOptions, repoContext, error) {
@@ -111,6 +138,7 @@ func mergeCLIOptions(cfg repoConfig, cli cliOptions) cliOptions {
 		sshOptions:       append(stringSliceFlag(nil), cfg.sshOptions...),
 		ignoreKnownHosts: cfg.ignoreKnownHosts,
 		remoteService:    cfg.remoteService,
+		deployment:       cfg.deployment,
 		writeConfig:      cli.writeConfig,
 	}
 
@@ -145,6 +173,7 @@ func mergeCLIOptions(cfg repoConfig, cli cliOptions) cliOptions {
 		merged.ignoreKnownHosts = true
 	}
 
+	merged.deployment = buildDeploymentOptions(merged)
 	return merged
 }
 
@@ -160,123 +189,109 @@ func loadRepoConfig(configPath, baseDir string) (repoConfig, error) {
 }
 
 func parseRepoConfig(content, baseDir string) (repoConfig, error) {
+	var doc repoConfigDocument
+	meta, err := toml.Decode(content, &doc)
+	if err != nil {
+		return repoConfig{}, fmt.Errorf("%s: %w", repoConfigFileName, err)
+	}
+	if err := validateRepoConfigKeys(meta); err != nil {
+		return repoConfig{}, fmt.Errorf("%s: %w", repoConfigFileName, err)
+	}
+	return repoConfigFromDocument(doc, baseDir)
+}
+
+func validateRepoConfigKeys(meta toml.MetaData) error {
+	undecoded := meta.Undecoded()
+	if len(undecoded) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unsupported key %q", undecoded[0].String())
+}
+
+func repoConfigFromDocument(doc repoConfigDocument, baseDir string) (repoConfig, error) {
 	var cfg repoConfig
-	section := ""
 
-	for lineNumber, rawLine := range strings.Split(content, "\n") {
-		line := strings.TrimSpace(stripTOMLComment(rawLine))
-		if line == "" {
-			continue
+	if strings.TrimSpace(doc.LocalPath) != "" {
+		resolved, err := resolvePathValue(doc.LocalPath, baseDir)
+		if err != nil {
+			return repoConfig{}, err
 		}
+		cfg.localPath = resolved
+	}
+	cfg.remoteHost = doc.RemoteHost
+	cfg.remoteService = doc.RemoteService
 
-		if strings.HasPrefix(line, "[") {
-			if !strings.HasSuffix(line, "]") {
-				return repoConfig{}, fmt.Errorf("%s:%d: invalid section header", repoConfigFileName, lineNumber+1)
+	if doc.SSH != nil {
+		if doc.SSH.Config != nil {
+			resolved, err := resolvePathValue(*doc.SSH.Config, baseDir)
+			if err != nil {
+				return repoConfig{}, err
 			}
-			section = strings.TrimSpace(line[1 : len(line)-1])
-			if section != "ssh" {
-				return repoConfig{}, fmt.Errorf("%s:%d: unsupported section %q", repoConfigFileName, lineNumber+1, section)
+			cfg.sshConfigPath = resolved
+			cfg.sshConfigSet = true
+		}
+		if doc.SSH.Port != nil {
+			cfg.sshPort = *doc.SSH.Port
+			cfg.sshPortSet = true
+		}
+		if doc.SSH.IgnoreKnownHosts != nil {
+			cfg.ignoreKnownHosts = *doc.SSH.IgnoreKnownHosts
+		}
+		if len(doc.SSH.IdentityFiles) > 0 {
+			cfg.identityFiles = make([]string, 0, len(doc.SSH.IdentityFiles))
+			for _, identityFile := range doc.SSH.IdentityFiles {
+				resolved, err := resolvePathValue(identityFile, baseDir)
+				if err != nil {
+					return repoConfig{}, err
+				}
+				cfg.identityFiles = append(cfg.identityFiles, resolved)
 			}
-			continue
 		}
-
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			return repoConfig{}, fmt.Errorf("%s:%d: expected key = value", repoConfigFileName, lineNumber+1)
+		if len(doc.SSH.Options) > 0 {
+			cfg.sshOptions = append([]string(nil), doc.SSH.Options...)
 		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
+	}
 
-		if err := applyRepoConfigValue(&cfg, section, key, value, baseDir); err != nil {
-			return repoConfig{}, fmt.Errorf("%s:%d: %w", repoConfigFileName, lineNumber+1, err)
+	if doc.Deploy != nil {
+		if doc.Deploy.BackupDir != nil {
+			if strings.TrimSpace(*doc.Deploy.BackupDir) == "" {
+				return repoConfig{}, fmt.Errorf("backup_dir must not be empty")
+			}
+			cfg.deployment.backupDir = *doc.Deploy.BackupDir
+			cfg.deployment.backupDirSet = true
+		}
+		if doc.Deploy.LogLines != nil {
+			if *doc.Deploy.LogLines < 0 {
+				return repoConfig{}, fmt.Errorf("log_lines must be >= 0")
+			}
+			cfg.deployment.logLines = *doc.Deploy.LogLines
+			cfg.deployment.logLinesSet = true
+		}
+		if doc.Deploy.HealthCheckWait != nil {
+			duration, err := time.ParseDuration(*doc.Deploy.HealthCheckWait)
+			if err != nil {
+				return repoConfig{}, fmt.Errorf("expected duration string, got %q", *doc.Deploy.HealthCheckWait)
+			}
+			if duration < 0 {
+				return repoConfig{}, fmt.Errorf("health_check_wait must be >= 0")
+			}
+			cfg.deployment.healthCheckWait = duration
+			cfg.deployment.healthCheckWaitSet = true
+		}
+		if doc.Deploy.LockTimeout != nil {
+			duration, err := time.ParseDuration(*doc.Deploy.LockTimeout)
+			if err != nil {
+				return repoConfig{}, fmt.Errorf("expected duration string, got %q", *doc.Deploy.LockTimeout)
+			}
+			if duration < 0 {
+				return repoConfig{}, fmt.Errorf("lock_timeout must be >= 0")
+			}
+			cfg.deployment.lockTimeout = duration
+			cfg.deployment.lockTimeoutSet = true
 		}
 	}
 
 	return cfg, nil
-}
-
-func applyRepoConfigValue(cfg *repoConfig, section, key, value, baseDir string) error {
-	switch section {
-	case "":
-		switch key {
-		case "local_path":
-			resolved, err := resolveConfigPath(value, baseDir)
-			if err != nil {
-				return err
-			}
-			cfg.localPath = resolved
-		case "remote_host":
-			parsed, err := parseTOMLString(value)
-			if err != nil {
-				return err
-			}
-			cfg.remoteHost = parsed
-		case "remote_service":
-			parsed, err := parseTOMLString(value)
-			if err != nil {
-				return err
-			}
-			cfg.remoteService = parsed
-		default:
-			return fmt.Errorf("unsupported key %q", key)
-		}
-	case "ssh":
-		switch key {
-		case "config":
-			resolved, err := resolveConfigPath(value, baseDir)
-			if err != nil {
-				return err
-			}
-			cfg.sshConfigPath = resolved
-			cfg.sshConfigSet = true
-		case "port":
-			parsed, err := parseTOMLInt(value)
-			if err != nil {
-				return err
-			}
-			cfg.sshPort = parsed
-			cfg.sshPortSet = true
-		case "ignore_known_hosts":
-			parsed, err := parseTOMLBool(value)
-			if err != nil {
-				return err
-			}
-			cfg.ignoreKnownHosts = parsed
-		case "identity_files":
-			parsed, err := parseTOMLStringArray(value)
-			if err != nil {
-				return err
-			}
-			cfg.identityFiles = make([]string, 0, len(parsed))
-			for _, item := range parsed {
-				resolved, err := resolvePathValue(item, baseDir)
-				if err != nil {
-					return err
-				}
-				cfg.identityFiles = append(cfg.identityFiles, resolved)
-			}
-		case "options":
-			parsed, err := parseTOMLStringArray(value)
-			if err != nil {
-				return err
-			}
-			cfg.sshOptions = append([]string(nil), parsed...)
-		default:
-			return fmt.Errorf("unsupported key %q", key)
-		}
-	default:
-		return fmt.Errorf("unsupported section %q", section)
-	}
-
-	return nil
-}
-
-func resolveConfigPath(value, baseDir string) (string, error) {
-	parsed, err := parseTOMLString(value)
-	if err != nil {
-		return "", err
-	}
-	return resolvePathValue(parsed, baseDir)
 }
 
 func resolvePathValue(value, baseDir string) (string, error) {
@@ -293,104 +308,16 @@ func resolvePathValue(value, baseDir string) (string, error) {
 	return filepath.Clean(filepath.Join(baseDir, value)), nil
 }
 
-func stripTOMLComment(line string) string {
-	inString := false
-	escaped := false
-	for i := 0; i < len(line); i++ {
-		switch {
-		case escaped:
-			escaped = false
-		case line[i] == '\\' && inString:
-			escaped = true
-		case line[i] == '"':
-			inString = !inString
-		case line[i] == '#' && !inString:
-			return line[:i]
-		}
-	}
-	return line
-}
-
-func parseTOMLString(value string) (string, error) {
-	parsed, err := strconv.Unquote(strings.TrimSpace(value))
-	if err != nil {
-		return "", fmt.Errorf("expected quoted string, got %q", value)
-	}
-	return parsed, nil
-}
-
-func parseTOMLInt(value string) (int, error) {
-	parsed, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil {
-		return 0, fmt.Errorf("expected integer, got %q", value)
-	}
-	return parsed, nil
-}
-
-func parseTOMLBool(value string) (bool, error) {
-	switch strings.TrimSpace(strings.ToLower(value)) {
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
-	default:
-		return false, fmt.Errorf("expected boolean, got %q", value)
-	}
-}
-
-func parseTOMLStringArray(value string) ([]string, error) {
-	value = strings.TrimSpace(value)
-	if !strings.HasPrefix(value, "[") || !strings.HasSuffix(value, "]") {
-		return nil, fmt.Errorf("expected string array, got %q", value)
-	}
-
-	body := strings.TrimSpace(value[1 : len(value)-1])
-	if body == "" {
-		return nil, nil
-	}
-
-	parts := []string{}
-	start := 0
-	inString := false
-	escaped := false
-	for i := 0; i < len(body); i++ {
-		switch {
-		case escaped:
-			escaped = false
-		case body[i] == '\\' && inString:
-			escaped = true
-		case body[i] == '"':
-			inString = !inString
-		case body[i] == ',' && !inString:
-			parts = append(parts, strings.TrimSpace(body[start:i]))
-			start = i + 1
-		}
-	}
-	if inString {
-		return nil, fmt.Errorf("unterminated string array")
-	}
-	parts = append(parts, strings.TrimSpace(body[start:]))
-
-	items := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part == "" {
-			return nil, fmt.Errorf("expected string array, got %q", value)
-		}
-		item, err := parseTOMLString(part)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, nil
-}
-
 func writeRepoConfig(configPath, rootDir, cwd string, opts cliOptions) error {
 	cfg, err := repoConfigFromOptions(rootDir, cwd, opts)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, []byte(renderRepoConfig(cfg)), 0o600)
+	data, err := encodeRepoConfig(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, data, 0o600)
 }
 
 func repoConfigFromOptions(rootDir, cwd string, opts cliOptions) (repoConfig, error) {
@@ -411,6 +338,7 @@ func repoConfigFromOptions(rootDir, cwd string, opts cliOptions) (repoConfig, er
 		localPath:        localPath,
 		remoteHost:       remoteHost,
 		remoteService:    opts.remoteService,
+		deployment:       opts.deployment,
 		sshPort:          opts.sshPort,
 		sshPortSet:       opts.sshPortSet,
 		ignoreKnownHosts: opts.ignoreKnownHosts,
@@ -456,44 +384,90 @@ func pathForRepoConfig(value, rootDir, cwd string) (string, error) {
 	return resolved, nil
 }
 
-func renderRepoConfig(cfg repoConfig) string {
-	lines := []string{
-		fmt.Sprintf("local_path = %s", strconv.Quote(cfg.localPath)),
-		fmt.Sprintf("remote_host = %s", strconv.Quote(cfg.remoteHost)),
-		fmt.Sprintf("remote_service = %s", strconv.Quote(cfg.remoteService)),
+func encodeRepoConfig(cfg repoConfig) ([]byte, error) {
+	doc := repoConfigDocument{
+		LocalPath:     cfg.localPath,
+		RemoteHost:    cfg.remoteHost,
+		RemoteService: cfg.remoteService,
 	}
 
-	sshLines := []string{}
-	if cfg.sshConfigSet {
-		sshLines = append(sshLines, fmt.Sprintf("config = %s", strconv.Quote(cfg.sshConfigPath)))
+	if sshDoc := buildRepoSSHDocument(cfg); sshDoc != nil {
+		doc.SSH = sshDoc
 	}
-	if cfg.sshPortSet {
-		sshLines = append(sshLines, fmt.Sprintf("port = %d", cfg.sshPort))
-	}
-	if cfg.ignoreKnownHosts {
-		sshLines = append(sshLines, "ignore_known_hosts = true")
-	}
-	if len(cfg.identityFiles) > 0 {
-		sshLines = append(sshLines, fmt.Sprintf("identity_files = %s", renderTOMLStringArray(cfg.identityFiles)))
-	}
-	if len(cfg.sshOptions) > 0 {
-		sshLines = append(sshLines, fmt.Sprintf("options = %s", renderTOMLStringArray(cfg.sshOptions)))
+	if deployDoc := buildRepoDeployDocument(cfg); deployDoc != nil {
+		doc.Deploy = deployDoc
 	}
 
-	if len(sshLines) > 0 {
-		lines = append(lines, "", "[ssh]")
-		lines = append(lines, sshLines...)
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(doc); err != nil {
+		return nil, err
 	}
-
-	return strings.Join(lines, "\n") + "\n"
+	return buf.Bytes(), nil
 }
 
-func renderTOMLStringArray(values []string) string {
-	quoted := make([]string, 0, len(values))
-	for _, value := range values {
-		quoted = append(quoted, strconv.Quote(value))
+func buildRepoSSHDocument(cfg repoConfig) *repoSSHDocument {
+	doc := &repoSSHDocument{}
+	hasValues := false
+
+	if cfg.sshConfigSet {
+		value := cfg.sshConfigPath
+		doc.Config = &value
+		hasValues = true
 	}
-	return "[" + strings.Join(quoted, ", ") + "]"
+	if cfg.sshPortSet {
+		value := cfg.sshPort
+		doc.Port = &value
+		hasValues = true
+	}
+	if cfg.ignoreKnownHosts {
+		value := true
+		doc.IgnoreKnownHosts = &value
+		hasValues = true
+	}
+	if len(cfg.identityFiles) > 0 {
+		doc.IdentityFiles = append([]string(nil), cfg.identityFiles...)
+		hasValues = true
+	}
+	if len(cfg.sshOptions) > 0 {
+		doc.Options = append([]string(nil), cfg.sshOptions...)
+		hasValues = true
+	}
+
+	if !hasValues {
+		return nil
+	}
+	return doc
+}
+
+func buildRepoDeployDocument(cfg repoConfig) *repoDeployDocument {
+	doc := &repoDeployDocument{}
+	hasValues := false
+
+	if cfg.deployment.backupDirSet {
+		value := cfg.deployment.backupDir
+		doc.BackupDir = &value
+		hasValues = true
+	}
+	if cfg.deployment.logLinesSet {
+		value := cfg.deployment.logLines
+		doc.LogLines = &value
+		hasValues = true
+	}
+	if cfg.deployment.healthCheckWaitSet {
+		value := cfg.deployment.healthCheckWait.String()
+		doc.HealthCheckWait = &value
+		hasValues = true
+	}
+	if cfg.deployment.lockTimeoutSet {
+		value := cfg.deployment.lockTimeout.String()
+		doc.LockTimeout = &value
+		hasValues = true
+	}
+
+	if !hasValues {
+		return nil
+	}
+	return doc
 }
 
 func ensureRepoGitignoreEntry(rootDir string) error {

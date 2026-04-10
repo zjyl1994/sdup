@@ -21,17 +21,21 @@ func TestSystemdUpdateSkipsSSHWhenLocalFileMissing(t *testing.T) {
 
 	dialCalled := false
 	deployCalled := false
+	deployOpts := defaultDeploymentOptions()
 
 	dialSSHSessionFn = func(remoteHost string, sshOptions sshclient.Options) (sshclient.Session, error) {
 		dialCalled = true
 		return nil, errors.New("unexpected dial")
 	}
-	deploySystemdUpdateFn = func(session sshclient.Session, localFile, remoteService string, totalSize int64) error {
+	deploySystemdUpdateFn = func(session sshclient.Session, localFile, remoteService string, totalSize int64, opts deploymentOptions) error {
 		deployCalled = true
+		if opts != deployOpts {
+			t.Fatalf("deployment options = %+v, want %+v", opts, deployOpts)
+		}
 		return nil
 	}
 
-	err := SystemdUpdate("/tmp/definitely-missing-sdup-binary", "api", "prod", sshCLIOptions{})
+	err := SystemdUpdate("/tmp/definitely-missing-sdup-binary", "api", "prod", sshCLIOptions{}, deployOpts)
 	if err == nil {
 		t.Fatal("SystemdUpdate returned nil error for missing file")
 	}
@@ -60,6 +64,7 @@ func TestSystemdUpdatePrintsLocalSizeBeforeSSH(t *testing.T) {
 	}
 
 	reported := false
+	deployOpts := deploymentOptions{backupDir: "/var/tmp/custom", logLines: 12, healthCheckWait: 2}
 	reportUploadStartFn = func(totalSize int64) {
 		reported = true
 		if totalSize != int64(len(content)) {
@@ -72,14 +77,17 @@ func TestSystemdUpdatePrintsLocalSizeBeforeSSH(t *testing.T) {
 		}
 		return &fakeRemoteSession{}, nil
 	}
-	deploySystemdUpdateFn = func(session sshclient.Session, localFile, remoteService string, totalSize int64) error {
+	deploySystemdUpdateFn = func(session sshclient.Session, localFile, remoteService string, totalSize int64, opts deploymentOptions) error {
 		if totalSize != int64(len(content)) {
 			t.Fatalf("totalSize = %d, want %d", totalSize, len(content))
+		}
+		if opts != deployOpts {
+			t.Fatalf("deployment options = %+v, want %+v", opts, deployOpts)
 		}
 		return nil
 	}
 
-	if err := SystemdUpdate(localFile, "api", "prod", sshCLIOptions{}); err != nil {
+	if err := SystemdUpdate(localFile, "api", "prod", sshCLIOptions{}, deployOpts); err != nil {
 		t.Fatalf("SystemdUpdate returned error: %v", err)
 	}
 	if !reported {

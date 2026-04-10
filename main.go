@@ -36,7 +36,7 @@ func main() {
 		return
 	}
 
-	if err := SystemdUpdate(opts.args[0], opts.remoteService, opts.args[1], buildSSHCLIOptions(opts)); err != nil {
+	if err := SystemdUpdate(opts.args[0], opts.remoteService, opts.args[1], buildSSHCLIOptions(opts), buildDeploymentOptions(opts)); err != nil {
 		os.Stderr.WriteString(err.Error() + "\n")
 		os.Exit(1)
 	}

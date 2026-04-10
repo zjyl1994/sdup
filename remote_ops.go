@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,16 +15,226 @@ import (
 )
 
 var execStartPathPattern = regexp.MustCompile(`path=([^ ;]+)`)
+var healthCheckSleepFn = time.Sleep
+
+type deploymentLockResult struct {
+	recoveredStaleLock bool
+}
 
 const progressRefreshInterval = 200 * time.Millisecond
 const progressBarWidth = 24
 
+type deploymentCheck struct {
+	execPath   string
+	backupDir  string
+	backupPath string
+	lockDir    string
+}
+
 func fetchExecStartPath(session sshclient.Session, unit string) (string, error) {
-	out, err := session.Run(fmt.Sprintf("systemctl show %s -p ExecStart", unit))
+	out, err := runRemoteCommand(session, fetchExecStartCommand(unit), fmt.Sprintf("inspect systemd service %q", unit))
 	if err != nil {
 		return "", err
 	}
 	return extractExecStartPath(strings.TrimSpace(string(out)))
+}
+
+func runDeploymentChecks(session sshclient.Session, service string, opts deploymentOptions) (*deploymentCheck, error) {
+	execPath, err := fetchExecStartPath(session, service)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := runRemoteCommand(session, ensureSudoCommand(), "verify sudo access"); err != nil {
+		return nil, err
+	}
+	if _, err := runRemoteCommand(session, checkRemoteExecutableCommand(execPath), fmt.Sprintf("verify remote executable %q", execPath)); err != nil {
+		return nil, err
+	}
+
+	backupDir := filepath.Join(opts.backupDir, service)
+	if _, err := runRemoteCommand(session, ensureRemoteDirCommand(backupDir), fmt.Sprintf("prepare backup dir %q", backupDir)); err != nil {
+		return nil, err
+	}
+
+	return &deploymentCheck{
+		execPath:   execPath,
+		backupDir:  backupDir,
+		backupPath: filepath.Join(backupDir, "previous"),
+		lockDir:    filepath.Join(backupDir, ".deploy-lock"),
+	}, nil
+}
+
+func acquireDeploymentLock(session sshclient.Session, lockDir string, timeout time.Duration) (deploymentLockResult, error) {
+	_, err := runRemoteCommand(session, acquireDeploymentLockCommand(lockDir), fmt.Sprintf("acquire deployment lock %q", lockDir))
+	if err == nil {
+		if refreshErr := refreshDeploymentLock(session, lockDir); refreshErr != nil {
+			return deploymentLockResult{}, refreshErr
+		}
+		return deploymentLockResult{}, nil
+	}
+	if !isLockAlreadyHeldError(err) {
+		return deploymentLockResult{}, err
+	}
+
+	retry, recovered, recoverErr := recoverStaleDeploymentLock(session, lockDir, timeout)
+	if recoverErr != nil {
+		return deploymentLockResult{}, errors.Join(err, recoverErr)
+	}
+	if !retry {
+		return deploymentLockResult{}, err
+	}
+
+	if _, retryErr := runRemoteCommand(session, acquireDeploymentLockCommand(lockDir), fmt.Sprintf("acquire deployment lock %q", lockDir)); retryErr != nil {
+		return deploymentLockResult{}, retryErr
+	}
+	if refreshErr := refreshDeploymentLock(session, lockDir); refreshErr != nil {
+		return deploymentLockResult{}, refreshErr
+	}
+	return deploymentLockResult{recoveredStaleLock: recovered}, nil
+}
+
+func releaseDeploymentLock(session sshclient.Session, lockDir string) error {
+	if strings.TrimSpace(lockDir) == "" {
+		return nil
+	}
+	_, err := runRemoteCommand(session, releaseDeploymentLockCommand(lockDir), fmt.Sprintf("release deployment lock %q", lockDir))
+	return err
+}
+
+func refreshDeploymentLock(session sshclient.Session, lockDir string) error {
+	if strings.TrimSpace(lockDir) == "" {
+		return nil
+	}
+	_, err := runRemoteCommand(session, refreshDeploymentLockCommand(lockDir), fmt.Sprintf("refresh deployment lock %q", lockDir))
+	return err
+}
+
+func backupCurrentBinary(session sshclient.Session, execPath, backupPath string) error {
+	_, err := runRemoteCommand(session, copyBinaryCommand(execPath, backupPath), fmt.Sprintf("backup current binary to %q", backupPath))
+	return err
+}
+
+func cleanupBackupBinary(session sshclient.Session, backupPath string) error {
+	_, err := runRemoteCommand(session, removeRemoteFileCommand(backupPath), fmt.Sprintf("cleanup backup binary %q", backupPath))
+	return err
+}
+
+func installUploadedBinary(session sshclient.Session, stagingPath, execPath string) error {
+	_, err := runRemoteCommand(session, installBinaryCommand(stagingPath, execPath), fmt.Sprintf("install uploaded binary to %q", execPath))
+	return err
+}
+
+func restartService(session sshclient.Session, service string) error {
+	_, err := runRemoteCommand(session, restartServiceCommand(service), fmt.Sprintf("restart service %q", service))
+	return err
+}
+
+func verifyServiceActive(session sshclient.Session, service string) error {
+	_, err := runRemoteCommand(session, verifyServiceActiveCommand(service), fmt.Sprintf("verify service %q is active", service))
+	return err
+}
+
+func verifyServiceStable(session sshclient.Session, service, lockDir string, waitWindow time.Duration) error {
+	if err := verifyServiceActive(session, service); err != nil {
+		return err
+	}
+	if err := refreshDeploymentLock(session, lockDir); err != nil {
+		return err
+	}
+
+	remaining := waitWindow
+	for remaining > 0 {
+		sleepFor := healthCheckPollInterval
+		if remaining < sleepFor {
+			sleepFor = remaining
+		}
+		healthCheckSleepFn(sleepFor)
+		remaining -= sleepFor
+		if err := verifyServiceActive(session, service); err != nil {
+			return err
+		}
+		if err := refreshDeploymentLock(session, lockDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rollbackBinary(session sshclient.Session, service, backupPath, execPath string) (string, error) {
+	if _, err := runRemoteCommand(session, installBinaryCommand(backupPath, execPath), fmt.Sprintf("restore backup for service %q", service)); err != nil {
+		return backupPath, err
+	}
+	if err := restartService(session, service); err != nil {
+		return backupPath, err
+	}
+	if err := verifyServiceActive(session, service); err != nil {
+		return backupPath, err
+	}
+	return backupPath, nil
+}
+
+func recoverStaleDeploymentLock(session sshclient.Session, lockDir string, timeout time.Duration) (retry bool, recovered bool, err error) {
+	if timeout <= 0 {
+		return false, false, nil
+	}
+	exists, err := remoteDirExists(session, lockDir)
+	if err != nil {
+		return false, false, err
+	}
+	if !exists {
+		return true, false, nil
+	}
+
+	modifiedAt, err := remotePathModTime(session, lockDir)
+	if err != nil {
+		return false, false, err
+	}
+	if time.Since(modifiedAt) < timeout {
+		return false, false, nil
+	}
+	if _, err := runRemoteCommand(session, releaseDeploymentLockCommand(lockDir), fmt.Sprintf("remove stale deployment lock %q", lockDir)); err != nil {
+		return false, false, err
+	}
+	return true, true, nil
+}
+
+func remoteDirExists(session sshclient.Session, path string) (bool, error) {
+	out, err := session.Run(checkRemoteDirCommand(path))
+	if err == nil {
+		return true, nil
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return false, nil
+	}
+	return false, fmt.Errorf("check remote dir %q: %w; output: %s", path, err, strings.TrimSpace(string(out)))
+}
+
+func remotePathModTime(session sshclient.Session, path string) (time.Time, error) {
+	out, err := runRemoteCommand(session, statRemoteModTimeCommand(path), fmt.Sprintf("inspect remote path %q", path))
+	if err != nil {
+		return time.Time{}, err
+	}
+	seconds, parseErr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if parseErr != nil {
+		return time.Time{}, fmt.Errorf("parse remote path modtime %q: %w", path, parseErr)
+	}
+	return time.Unix(seconds, 0), nil
+}
+
+func isLockAlreadyHeldError(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "file exists")
+}
+
+func fetchRecentServiceLogs(session sshclient.Session, service string, lines int) (string, error) {
+	out, err := session.Run(fetchRecentLogsCommand(service, lines))
+	trimmed := strings.TrimSpace(string(out))
+	if err != nil {
+		if trimmed == "" {
+			return "", fmt.Errorf("fetch recent logs for %q: %w", service, err)
+		}
+		return trimmed, fmt.Errorf("fetch recent logs for %q: %w; output: %s", service, err, trimmed)
+	}
+	return trimmed, nil
 }
 
 type remoteStaging struct {
@@ -123,6 +334,19 @@ func cleanupRemoteTempDir(session sshclient.Session, remoteDir string) error {
 		return fmt.Errorf("cleanup remote temp dir %q: %w", remoteDir, err)
 	}
 	return nil
+}
+
+func runRemoteCommand(session sshclient.Session, cmd, action string) ([]byte, error) {
+	out, err := session.Run(cmd)
+	if err == nil {
+		return out, nil
+	}
+
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return out, fmt.Errorf("%s: %w", action, err)
+	}
+	return out, fmt.Errorf("%s: %w; output: %s", action, err, trimmed)
 }
 
 type uploadProgressRenderer struct {
@@ -231,6 +455,66 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
+func fetchExecStartCommand(service string) string {
+	return fmt.Sprintf("systemctl show %s -p ExecStart", shellQuote(service))
+}
+
+func ensureSudoCommand() string {
+	return "sudo -n true"
+}
+
+func checkRemoteExecutableCommand(execPath string) string {
+	return "sudo -n test -x " + shellQuote(execPath)
+}
+
+func checkRemoteDirCommand(path string) string {
+	return "sudo -n test -d " + shellQuote(path)
+}
+
+func ensureRemoteDirCommand(dir string) string {
+	return "sudo -n mkdir -p -- " + shellQuote(dir)
+}
+
+func acquireDeploymentLockCommand(lockDir string) string {
+	return "sudo -n mkdir -- " + shellQuote(lockDir)
+}
+
+func releaseDeploymentLockCommand(lockDir string) string {
+	return "sudo -n rmdir -- " + shellQuote(lockDir)
+}
+
+func refreshDeploymentLockCommand(lockDir string) string {
+	return "sudo -n touch -c -- " + shellQuote(lockDir)
+}
+
+func removeRemoteFileCommand(path string) string {
+	return "sudo -n rm -f -- " + shellQuote(path)
+}
+
+func statRemoteModTimeCommand(path string) string {
+	return "sudo -n stat -c %Y -- " + shellQuote(path)
+}
+
+func copyBinaryCommand(execPath, backupPath string) string {
+	return fmt.Sprintf("sudo -n cp -- %s %s", shellQuote(execPath), shellQuote(backupPath))
+}
+
+func installBinaryCommand(srcPath, dstPath string) string {
+	return fmt.Sprintf("sudo -n install -m 0755 -T %s %s", shellQuote(srcPath), shellQuote(dstPath))
+}
+
+func restartServiceCommand(service string) string {
+	return fmt.Sprintf("sudo -n systemctl restart %s", shellQuote(service))
+}
+
+func verifyServiceActiveCommand(service string) string {
+	return fmt.Sprintf("sudo -n systemctl is-active %s", shellQuote(service))
+}
+
+func fetchRecentLogsCommand(service string, lines int) string {
+	return fmt.Sprintf("sudo -n journalctl -u %s -n %d --no-pager", shellQuote(service), lines)
+}
+
 func formatByteSize(size float64) string {
 	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
 	unit := 0
@@ -242,13 +526,4 @@ func formatByteSize(size float64) string {
 		return fmt.Sprintf("%.0f %s", size, units[unit])
 	}
 	return fmt.Sprintf("%.1f %s", size, units[unit])
-}
-
-func composeUpdateCommand(execPath, service string, staging *remoteStaging) string {
-	tmpFile := staging.filePath
-	dir := staging.dir
-	return fmt.Sprintf(
-		"trap 'rm -f %s; rmdir %s 2>/dev/null || true' EXIT; set -e; sudo install -m 0755 -T %s %s && sudo systemctl restart %s",
-		tmpFile, dir, tmpFile, execPath, service,
-	)
 }

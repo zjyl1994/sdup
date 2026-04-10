@@ -19,6 +19,7 @@ type cliOptions struct {
 	sshOptions       stringSliceFlag
 	ignoreKnownHosts bool
 	remoteService    string
+	deployment       deploymentOptions
 	writeConfig      bool
 	args             []string
 }
